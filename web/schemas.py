@@ -119,14 +119,14 @@ class ReportTrigger(BaseModel):
     repo_names: list[str] = Field(default_factory=list, description="指定仓库列表，空 = 全部")
     skip_fetch: bool = Field(True, description="跳过 git fetch，直接用本地缓存")
     snapshot_id: int | None = Field(None, description="活跃项目筛选结果快照")
-    activity_window: Literal["week", "half_month", "month"] | None = Field(None, description="仓库活跃标签窗口")
+    activity_window: Literal["today", "this_week", "this_month"] | None = Field(None, description="仓库活跃标签窗口")
     dry_run: bool = False
 
 
 class ActiveRepositoriesRequest(BaseModel):
     report_type: Literal["daily", "weekly", "monthly"] = "daily"
     skip_fetch: bool = True
-    activity_window: Literal["week", "half_month", "month"] | None = None
+    activity_window: Literal["today", "this_week", "this_month"] | None = None
 
 
 class ReportOut(BaseModel):

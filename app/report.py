@@ -81,10 +81,21 @@ def _render_markdown(report: Report) -> str:
         f"扫描 {report.scanned_repositories} 个仓库，活跃 {report.active_repositories} 个，"
         f"无提交 {report.empty_repositories} 个，失败 {report.failed_repositories} 个。"
     )
+    synced_count = report.scanned_repositories - report.failed_repositories
     lines = [
         f"# Git {type_label} | {start}" + (f" ~ {end}" if end != start else ""),
         "",
-        f"> 数据覆盖：{coverage}",
+        "## 0. WeFi-HLB 概览",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | ---: |",
+        f"| 仓库总数 | {report.scanned_repositories} |",
+        f"| 同步成功 | {synced_count} |",
+        f"| 活跃仓库 | {report.active_repositories} |",
+        f"| 无提交仓库 | {report.empty_repositories} |",
+        f"| 同步失败 | {report.failed_repositories} |",
+        f"| 提交总数 | {report.total_commits} |",
+        f"| 贡献者总数 | {report.contributor_count} |",
         "",
         "## 1. 执行摘要",
         "",
@@ -194,6 +205,14 @@ def render_period_markdown(report: PeriodReport) -> str:
 def _render_html(report: Report) -> str:
     start, end = _period(report)
     type_label = _label(report)
+    synced_count = report.scanned_repositories - report.failed_repositories
+    overview_rows = f"""<tr><td>仓库总数</td><td><strong>{report.scanned_repositories}</strong></td></tr>
+<tr><td>同步成功</td><td><strong style="color:#0d9488">{synced_count}</strong></td></tr>
+<tr><td>活跃仓库</td><td><strong style="color:#059669">{report.active_repositories}</strong></td></tr>
+<tr><td>无提交仓库</td><td>{report.empty_repositories}</td></tr>
+<tr><td>同步失败</td><td><strong style="color:#dc2626">{report.failed_repositories}</strong></td></tr>
+<tr><td>提交总数</td><td><strong>{report.total_commits}</strong></td></tr>
+<tr><td>贡献者总数</td><td><strong>{report.contributor_count}</strong></td></tr>"""
     activity_rows = "".join(
         f"<tr><td>{escape(str(row['name']))}</td><td>{escape(_status_label(str(row['status'])))}</td>"
         f"<td>{row['commits']}</td><td>{row['contributors']}</td><td>{row['files_changed']}</td>"
@@ -240,8 +259,11 @@ def _render_html(report: Report) -> str:
 
     return f"""<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#101828;max-width:1100px;margin:0 auto;padding:24px">
 <h1>Git {escape(type_label)} | {escape(start)}""" + (f" ~ {escape(end)}" if end != start else "") + f"""</h1>
-<p>扫描 <strong>{report.scanned_repositories}</strong> 个仓库，活跃 <strong>{report.active_repositories}</strong> 个，失败 <strong>{report.failed_repositories}</strong> 个。</p>
-<section style="background:#f0fdfa;border-left:4px solid #0d9488;padding:16px"><h2 style="margin-top:0">1. 执行摘要</h2>{_render_ai_html(report.ai_analysis)}</section>
+<h2 style="margin-top:0;margin-bottom:12px">0. WeFi-HLB 概览</h2>
+<table style="border-collapse:collapse;width:100%;margin-bottom:24px"><tr style="background:#f2f4f7"><th align="left">指标</th><th align="left">数值</th></tr>
+{overview_rows}
+</table>
+<section style="background:#f0fdfa;border-left:4px solid #0d9488;padding:16px;margin-bottom:24px"><h2 style="margin-top:0">1. 执行摘要</h2>{_render_ai_html(report.ai_analysis)}</section>
 <h2>2. 宏观概览</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">指标</th><th align="left">数值</th></tr>
 <tr><td>扫描仓库</td><td>{report.scanned_repositories}</td></tr><tr><td>活跃仓库</td><td>{report.active_repositories}</td></tr><tr><td>无提交仓库</td><td>{report.empty_repositories}</td></tr><tr><td>扫描失败仓库</td><td>{report.failed_repositories}</td></tr><tr><td>贡献者</td><td>{report.contributor_count}</td></tr><tr><td>提交数</td><td>{report.total_commits}</td></tr><tr><td>文件变更</td><td>{report.total_files_changed}</td></tr><tr><td>代码变更</td><td>+{report.total_additions} / -{report.total_deletions}</td></tr></table>
 <h2>3. 活动趋势</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">日期</th><th>提交</th><th>活跃仓库</th><th>贡献者</th></tr>{trend_rows}</table>

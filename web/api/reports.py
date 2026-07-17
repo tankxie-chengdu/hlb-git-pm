@@ -16,9 +16,13 @@ from ..schemas import ActiveRepositoriesRequest, ReportDetail, ReportOut, Report
 
 logger = logging.getLogger("hlb-git-pm.api.reports")
 
-# These ranges intentionally mirror the mutually exclusive labels on the
-# repository board: very_active, active, and normal.
-ACTIVITY_WINDOWS = {"week": (0, 7), "half_month": (7, 15), "month": (15, 30)}
+# These ranges match the activity levels shown on the repository board.
+# Ranges are (min_days_ago, max_days_ago), where max is exclusive.
+ACTIVITY_WINDOWS = {
+    "today": (0, 1),
+    "this_week": (0, 7),
+    "this_month": (0, 30),
+}
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -386,9 +390,9 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
                 rec.ai_analysis = result.ai_analysis
                 rec.total_commits = result.total_commits
                 activity_label = {
-                    "week": "近一周活跃",
-                    "half_month": "近半月活跃",
-                    "month": "近一个月活跃",
+                    "today": "今天活跃",
+                    "this_week": "本周活跃",
+                    "this_month": "本月活跃",
                 }.get(body.activity_window)
                 scope = f"（{activity_label}）" if activity_label else ""
                 rec.title = f"{report_type}{scope} {start.isoformat()} ~ {end.isoformat()}"
