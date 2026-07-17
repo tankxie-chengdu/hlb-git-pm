@@ -122,12 +122,7 @@ const reportTypeOptions = [
   { label: '周报', value: 'weekly' },
   { label: '月报', value: 'monthly' },
 ]
-const activityWindowOptions = [
-  { label: '近一周活跃', value: 'week' },
-  { label: '近半月活跃', value: 'half_month' },
-  { label: '近一个月活跃', value: 'month' },
-]
-const form = reactive({ report_type: 'daily', activity_window: 'week', repo_name: '', dry_run: true })
+const form = reactive({ report_type: 'daily', repo_name: '', dry_run: true })
 const period = reactive({ start: '', end: '' })
 const activeRepositories = ref([])
 const activeLoading = ref(false)
@@ -141,6 +136,16 @@ const periodRule = computed(() => ({
   weekly: '上一个自然周（周一至周日）',
   monthly: '上一个自然月',
 }[form.report_type]))
+const activityWindow = computed(() => ({
+  daily: 'today',
+  weekly: 'this_week',
+  monthly: 'this_month',
+}[form.report_type]))
+const activityLabel = computed(() => ({
+  today: '今天活跃',
+  this_week: '本周活跃',
+  this_month: '本月活跃',
+}[activityWindow.value]))
 const resultMessage = computed(() => result.value ? `报告 #${result.value.id} 已开始生成` : '')
 
 function typeLabel(type) { return { daily: '日报', weekly: '周报', monthly: '月报' }[type] || type }
@@ -154,7 +159,7 @@ async function loadActiveRepositories() {
     const { data } = await client.post('/reports/active-repositories', {
       report_type: form.report_type,
       skip_fetch: true,
-      activity_window: form.activity_window,
+      activity_window: activityWindow.value,
     }, { timeout: 10 * 60 * 1000 })
     period.start = data.period_start
     period.end = data.period_end
@@ -176,10 +181,6 @@ function handleTypeChange() {
   loadActiveRepositories()
 }
 
-function handleActivityChange() {
-  loadActiveRepositories()
-}
-
 async function handleTrigger() {
   triggering.value = true
   try {
@@ -189,7 +190,7 @@ async function handleTrigger() {
       // Active-project filtering already fetched the latest refs.
       skip_fetch: true,
       snapshot_id: snapshotId.value,
-      activity_window: form.activity_window,
+      activity_window: activityWindow.value,
       dry_run: form.dry_run,
     })
     result.value = data
