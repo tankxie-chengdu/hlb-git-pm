@@ -1,0 +1,46 @@
+timezone = "Asia/Shanghai"
+run_at = "18:30"
+workspace = ".data/repos"
+subject_prefix = "Git 每日提交日报"
+db_path = ".data/hlb-git-pm.db"
+
+[github]
+organization = "WeFi-HLB"
+app_id = 4320314
+installation_id = 147107481
+private_key_file = "secrets/your-github-app.private-key.pem"
+include_archived = false
+include_forks = false
+
+# 如果不使用 GitHub App，也可以改成手工列仓库：
+# [[repositories]]
+# name = "团队主仓库"
+# url = "https://github.com/your-org/your-repo.git"
+# branch = "main"
+# fetch = true
+
+# 也可以扫描本机已有仓库：
+# [[repositories]]
+# name = "本地仓库"
+# path = "/absolute/path/to/repository"
+# branch = "develop"
+# fetch = false
+
+[ai]
+enabled = true
+base_url = "https://api.z.ai/api/coding/paas/v4"
+api_key = "${ZAI_API_KEY}"
+model = "glm-5.2"
+timeout_seconds = 60
+max_commits = 80
+thinking_enabled = false
+
+[email]
+host = "smtp.example.com"
+port = 587
+username = "git-report@example.com"
+password = "${SMTP_PASSWORD}"
+sender = "git-report@example.com"
+recipients = ["engineering@example.com", "manager@example.com"]
+use_tls = true
+use_ssl = false

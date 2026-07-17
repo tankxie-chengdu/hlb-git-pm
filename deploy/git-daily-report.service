@@ -1,0 +1,16 @@
+[Unit]
+Description=Git Daily Report
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/git-daily-report
+ExecStart=/usr/bin/python3 -m app --config /opt/git-daily-report/config.toml
+Restart=on-failure
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+

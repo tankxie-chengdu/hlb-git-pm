@@ -1,0 +1,16 @@
+# Python 3.11+ 使用标准库 tomllib；Python 3.10 需要这个兼容包。
+tomli>=2.0.1; python_version < "3.11"
+PyJWT[crypto]>=2.8.0
+
+# Web
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+sqlalchemy>=2.0.0
+bcrypt>=4.0.0
+python-multipart>=0.0.9
+
+# 调度
+apscheduler>=3.10.0
+
+# 迁移
+alembic>=1.13.0
