@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from html import escape
 
@@ -36,6 +37,32 @@ def _status_label(status: str) -> str:
 
 def _last_commit_text(value: datetime | None) -> str:
     return value.strftime("%m-%d %H:%M") if value else "-"
+
+
+def _render_ai_html(value: str) -> str:
+    """Convert the AI's Markdown response into safe email HTML."""
+    text = value or "暂无 AI 分析。"
+    try:
+        import markdown
+
+        return markdown.markdown(
+            # Escape raw HTML before Markdown parsing; AI output is untrusted.
+            escape(text),
+            extensions=["extra", "sane_lists", "nl2br"],
+            output_format="html5",
+        )
+    except ImportError:
+        # Keep email generation functional in minimal installations.
+        return escape(text).replace("\n", "<br>")
+
+
+def refresh_ai_section_html(html: str, value: str) -> str:
+    """Repair the AI section of HTML saved by older report versions."""
+    pattern = re.compile(
+        r"(<section[^>]*>\s*<h2[^>]*>1\. 执行摘要</h2>).*?(</section>)",
+        re.DOTALL,
+    )
+    return pattern.sub(lambda match: f"{match.group(1)}{_render_ai_html(value)}{match.group(2)}", html, count=1)
 
 
 def _render_commit_markdown(report: Report, commit) -> str:
@@ -214,7 +241,7 @@ def _render_html(report: Report) -> str:
     return f"""<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#101828;max-width:1100px;margin:0 auto;padding:24px">
 <h1>Git {escape(type_label)} | {escape(start)}""" + (f" ~ {escape(end)}" if end != start else "") + f"""</h1>
 <p>扫描 <strong>{report.scanned_repositories}</strong> 个仓库，活跃 <strong>{report.active_repositories}</strong> 个，失败 <strong>{report.failed_repositories}</strong> 个。</p>
-<section style="background:#f0fdfa;border-left:4px solid #0d9488;padding:16px;white-space:pre-wrap"><h2 style="margin-top:0">1. 执行摘要</h2>{escape(report.ai_analysis or '暂无 AI 分析。').replace(chr(10), '<br>')}</section>
+<section style="background:#f0fdfa;border-left:4px solid #0d9488;padding:16px"><h2 style="margin-top:0">1. 执行摘要</h2>{_render_ai_html(report.ai_analysis)}</section>
 <h2>2. 宏观概览</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">指标</th><th align="left">数值</th></tr>
 <tr><td>扫描仓库</td><td>{report.scanned_repositories}</td></tr><tr><td>活跃仓库</td><td>{report.active_repositories}</td></tr><tr><td>无提交仓库</td><td>{report.empty_repositories}</td></tr><tr><td>扫描失败仓库</td><td>{report.failed_repositories}</td></tr><tr><td>贡献者</td><td>{report.contributor_count}</td></tr><tr><td>提交数</td><td>{report.total_commits}</td></tr><tr><td>文件变更</td><td>{report.total_files_changed}</td></tr><tr><td>代码变更</td><td>+{report.total_additions} / -{report.total_deletions}</td></tr></table>
 <h2>3. 活动趋势</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">日期</th><th>提交</th><th>活跃仓库</th><th>贡献者</th></tr>{trend_rows}</table>

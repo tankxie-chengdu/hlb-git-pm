@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import RepositoryConfig
-from app.git_service import scan_repository
+from app.git_service import ensure_repository, scan_repository
 
 
 class GitServiceTests(unittest.TestCase):
@@ -57,3 +57,14 @@ class GitServiceTests(unittest.TestCase):
             self.assertIsNotNone(result.error)
             self.assertIn("nonexistent", result.name)
 
+    def test_skip_clone_does_not_create_missing_mirror(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workspace = Path(temp_dir) / "workspace"
+            config = RepositoryConfig(
+                name="org/missing",
+                url="https://github.com/org/missing.git",
+                fetch=False,
+            )
+            with self.assertRaisesRegex(RuntimeError, "尚未同步本地 mirror"):
+                ensure_repository(config, workspace, allow_clone=False)
+            self.assertFalse((workspace / "org" / "missing").exists())

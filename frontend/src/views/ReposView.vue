@@ -50,199 +50,109 @@
 
     <div v-if="loading && !repos.length" v-loading="true" style="height: 300px" />
 
-    <!-- 活跃仓库分组 -->
-    <template v-if="!loading && activeRepos.length > 0">
-      <div style="display: flex; align-items: center; gap: 8px; margin: 16px 0 12px 0">
-        <span style="font-size: 13px; font-weight: 600; color: #303133">活跃仓库</span>
-        <span style="font-size: 12px; color: #909399">{{ activeRepos.length }} 个</span>
-      </div>
-      <el-card
-        v-for="repo in activeRepos"
-        :key="repo.full_name"
-        style="margin-bottom: 12px"
-        shadow="hover"
-      >
-        <div style="display: flex; align-items: flex-start; gap: 12px">
-          <!-- 仓库信息 -->
-          <div style="flex: 1; min-width: 0">
-            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-              <span style="font-size: 15px; font-weight: 600">{{ repo.full_name }}</span>
-              <el-tag size="small" type="success">活跃</el-tag>
-              <el-tag v-if="repo.language" size="small" type="info">{{ repo.language }}</el-tag>
-              <el-tag v-if="repo.is_archived" size="small" type="warning">归档</el-tag>
-              <el-tag v-if="repo.is_fork" size="small" type="info">Fork</el-tag>
-              <el-tag :type="cloneTagType(repo)" size="small">{{ cloneLabel(repo) }}</el-tag>
-            </div>
-            <div v-if="repo.description" style="color: #606266; font-size: 13px; margin-top: 4px">
-              {{ repo.description }}
-            </div>
-            <div style="color: #909399; font-size: 12px; margin-top: 4px">
-              最后推送：{{ repo.pushed_at ? repo.pushed_at.slice(0, 10) : '-' }}
-              &nbsp;·&nbsp; 默认分支：{{ repo.default_branch }}
-              <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
-            </div>
-          </div>
-
-          <!-- 贡献者汇总 -->
-          <div style="text-align: right; white-space: nowrap; color: #606266; font-size: 13px">
-            <span v-if="repo.is_cloned">
-              {{ repo.branch_count }} 个分支 &nbsp;·&nbsp;
-              {{ repo.total_commits }} 次提交 &nbsp;·&nbsp;
-              {{ repo.contributors.length }} 位贡献者
-            </span>
-            <span v-else style="color: #c0c4cc">未同步</span>
-          </div>
-
-          <!-- 单仓库同步按钮 -->
-          <el-button
-            size="small"
-            :loading="isSyncing(repo.full_name)"
-            :disabled="isSyncing(repo.full_name)"
-            @click.stop="syncOne(repo)"
-          >
-            {{ isSyncing(repo.full_name) ? '同步中' : repo.is_cloned ? '重新同步' : '同步' }}
-          </el-button>
-
-          <!-- 展开按钮 -->
-          <el-button
-            v-if="repo.is_cloned && repo.contributors.length"
-            link
-            @click="toggle(repo.full_name)"
-            style="padding: 0"
-          >
-            {{ expanded.has(repo.full_name) ? '收起' : '展开' }}
-          </el-button>
+    <!-- 按活跃程度分组展示 -->
+    <template v-for="(group, level) in activityGroups" :key="level">
+      <template v-if="group.repos.length > 0">
+        <div style="display: flex; align-items: center; gap: 8px; margin: 20px 0 12px 0">
+          <span style="font-size: 14px; font-weight: 600">{{ group.label }}</span>
+          <span style="font-size: 12px; color: #909399">({{ group.repos.length }} 个)</span>
         </div>
 
-        <!-- 贡献者明细 -->
-        <el-collapse-transition>
-          <div v-if="expanded.has(repo.full_name)" style="margin-top: 12px">
-            <!-- 汇总行 -->
-            <div style="display: flex; gap: 24px; margin-bottom: 10px; font-size: 13px; color: #606266">
-              <span><b>{{ repo.branch_count }}</b> 个分支</span>
-              <span><b>{{ repo.total_commits }}</b> 次提交（全分支去重）</span>
-              <span><b>{{ repo.contributors.length }}</b> 位贡献者</span>
+        <el-card
+          v-for="repo in group.repos"
+          :key="repo.full_name"
+          style="margin-bottom: 12px"
+          shadow="hover"
+        >
+          <div style="display: flex; align-items: flex-start; gap: 12px">
+            <!-- 仓库信息 -->
+            <div style="flex: 1; min-width: 0">
+              <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+                <span style="font-size: 15px; font-weight: 600">{{ repo.full_name }}</span>
+                <!-- 活跃程度标签 -->
+                <el-tag :type="repo.activity.color" size="small">
+                  {{ repo.activity.label }} ({{ repo.activity.days }}d)
+                </el-tag>
+                <el-tag v-if="repo.language" size="small" type="info">{{ repo.language }}</el-tag>
+                <el-tag v-if="repo.is_archived" size="small" type="warning">归档</el-tag>
+                <el-tag v-if="repo.is_fork" size="small" type="info">Fork</el-tag>
+                <el-tag :type="cloneTagType(repo)" size="small">{{ cloneLabel(repo) }}</el-tag>
+              </div>
+              <div v-if="repo.description" style="color: #606266; font-size: 13px; margin-top: 4px">
+                {{ repo.description }}
+              </div>
+              <div style="color: #909399; font-size: 12px; margin-top: 4px">
+                最后推送：{{ repo.pushed_at ? repo.pushed_at.slice(0, 10) : '-' }}
+                &nbsp;·&nbsp; 默认分支：{{ repo.default_branch }}
+                <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
+              </div>
             </div>
-            <el-table :data="repo.contributors" size="small" stripe>
-              <el-table-column label="姓名 / Git 用户名" min-width="140">
-                <template #default="{ row }">
-                  <span v-if="row.real_name" style="font-weight: 500">{{ row.real_name }}</span>
-                  <span v-if="row.real_name && row.git_name" style="color: #909399"> ({{ row.git_name }})</span>
-                  <span v-if="!row.real_name">{{ row.git_name || row.git_email }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="department" label="部门" width="120" />
-              <el-table-column prop="git_email" label="邮箱" min-width="180" />
-              <el-table-column prop="commit_count" label="提交数" width="90" align="right">
-                <template #default="{ row }">
-                  <el-tag type="primary" size="small">{{ row.commit_count }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="first_commit_at" label="首次提交" width="110" />
-              <el-table-column prop="last_commit_at" label="最近提交" width="110" />
-            </el-table>
+
+            <!-- 贡献者汇总 -->
+            <div style="text-align: right; white-space: nowrap; color: #606266; font-size: 13px">
+              <span v-if="repo.is_cloned">
+                {{ repo.branch_count }} 个分支 &nbsp;·&nbsp;
+                {{ repo.total_commits }} 次提交 &nbsp;·&nbsp;
+                {{ repo.contributors.length }} 位贡献者
+              </span>
+              <span v-else style="color: #c0c4cc">未同步</span>
+            </div>
+
+            <!-- 单仓库同步按钮 -->
+            <el-button
+              size="small"
+              :loading="isSyncing(repo.full_name)"
+              :disabled="isSyncing(repo.full_name)"
+              @click.stop="syncOne(repo)"
+            >
+              {{ isSyncing(repo.full_name) ? '同步中' : repo.is_cloned ? '重新同步' : '同步' }}
+            </el-button>
+
+            <!-- 展开按钮 -->
+            <el-button
+              v-if="repo.is_cloned && repo.contributors.length"
+              link
+              @click="toggle(repo.full_name)"
+              style="padding: 0"
+            >
+              {{ expanded.has(repo.full_name) ? '收起' : '展开' }}
+            </el-button>
           </div>
-        </el-collapse-transition>
-      </el-card>
+
+          <!-- 贡献者明细 -->
+          <el-collapse-transition>
+            <div v-if="expanded.has(repo.full_name)" style="margin-top: 12px">
+              <!-- 汇总行 -->
+              <div style="display: flex; gap: 24px; margin-bottom: 10px; font-size: 13px; color: #606266">
+                <span><b>{{ repo.branch_count }}</b> 个分支</span>
+                <span><b>{{ repo.total_commits }}</b> 次提交（全分支去重）</span>
+                <span><b>{{ repo.contributors.length }}</b> 位贡献者</span>
+              </div>
+              <el-table :data="repo.contributors" size="small" stripe>
+                <el-table-column label="姓名 / Git 用户名" min-width="140">
+                  <template #default="{ row }">
+                    <span v-if="row.real_name" style="font-weight: 500">{{ row.real_name }}</span>
+                    <span v-if="row.real_name && row.git_name" style="color: #909399"> ({{ row.git_name }})</span>
+                    <span v-if="!row.real_name">{{ row.git_name || row.git_email }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="department" label="部门" width="120" />
+                <el-table-column prop="git_email" label="邮箱" min-width="180" />
+                <el-table-column prop="commit_count" label="提交数" width="90" align="right">
+                  <template #default="{ row }">
+                    <el-tag type="primary" size="small">{{ row.commit_count }}</el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="first_commit_at" label="首次提交" width="110" />
+                <el-table-column prop="last_commit_at" label="最近提交" width="110" />
+              </el-table>
+            </div>
+          </el-collapse-transition>
+        </el-card>
+      </template>
     </template>
 
-    <!-- 非活跃仓库分组 -->
-    <template v-if="!loading && inactiveRepos.length > 0">
-      <div style="display: flex; align-items: center; gap: 8px; margin: 16px 0 12px 0">
-        <span style="font-size: 13px; font-weight: 600; color: #606266">非活跃仓库</span>
-        <span style="font-size: 12px; color: #909399">{{ inactiveRepos.length }} 个</span>
-      </div>
-      <el-card
-        v-for="repo in inactiveRepos"
-        :key="repo.full_name"
-        style="margin-bottom: 12px"
-        shadow="hover"
-      >
-        <div style="display: flex; align-items: flex-start; gap: 12px">
-          <!-- 仓库信息 -->
-          <div style="flex: 1; min-width: 0">
-            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-              <span style="font-size: 15px; font-weight: 600">{{ repo.full_name }}</span>
-              <el-tag size="small" type="info">非活跃</el-tag>
-              <el-tag v-if="repo.language" size="small" type="info">{{ repo.language }}</el-tag>
-              <el-tag v-if="repo.is_archived" size="small" type="warning">归档</el-tag>
-              <el-tag v-if="repo.is_fork" size="small" type="info">Fork</el-tag>
-              <el-tag :type="cloneTagType(repo)" size="small">{{ cloneLabel(repo) }}</el-tag>
-            </div>
-            <div v-if="repo.description" style="color: #606266; font-size: 13px; margin-top: 4px">
-              {{ repo.description }}
-            </div>
-            <div style="color: #909399; font-size: 12px; margin-top: 4px">
-              最后推送：{{ repo.pushed_at ? repo.pushed_at.slice(0, 10) : '-' }}
-              &nbsp;·&nbsp; 默认分支：{{ repo.default_branch }}
-              <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
-            </div>
-          </div>
-
-          <!-- 贡献者汇总 -->
-          <div style="text-align: right; white-space: nowrap; color: #606266; font-size: 13px">
-            <span v-if="repo.is_cloned">
-              {{ repo.branch_count }} 个分支 &nbsp;·&nbsp;
-              {{ repo.total_commits }} 次提交 &nbsp;·&nbsp;
-              {{ repo.contributors.length }} 位贡献者
-            </span>
-            <span v-else style="color: #c0c4cc">未同步</span>
-          </div>
-
-          <!-- 单仓库同步按钮 -->
-          <el-button
-            size="small"
-            :loading="isSyncing(repo.full_name)"
-            :disabled="isSyncing(repo.full_name)"
-            @click.stop="syncOne(repo)"
-          >
-            {{ isSyncing(repo.full_name) ? '同步中' : repo.is_cloned ? '重新同步' : '同步' }}
-          </el-button>
-
-          <!-- 展开按钮 -->
-          <el-button
-            v-if="repo.is_cloned && repo.contributors.length"
-            link
-            @click="toggle(repo.full_name)"
-            style="padding: 0"
-          >
-            {{ expanded.has(repo.full_name) ? '收起' : '展开' }}
-          </el-button>
-        </div>
-
-        <!-- 贡献者明细 -->
-        <el-collapse-transition>
-          <div v-if="expanded.has(repo.full_name)" style="margin-top: 12px">
-            <!-- 汇总行 -->
-            <div style="display: flex; gap: 24px; margin-bottom: 10px; font-size: 13px; color: #606266">
-              <span><b>{{ repo.branch_count }}</b> 个分支</span>
-              <span><b>{{ repo.total_commits }}</b> 次提交（全分支去重）</span>
-              <span><b>{{ repo.contributors.length }}</b> 位贡献者</span>
-            </div>
-            <el-table :data="repo.contributors" size="small" stripe>
-              <el-table-column label="姓名 / Git 用户名" min-width="140">
-                <template #default="{ row }">
-                  <span v-if="row.real_name" style="font-weight: 500">{{ row.real_name }}</span>
-                  <span v-if="row.real_name && row.git_name" style="color: #909399"> ({{ row.git_name }})</span>
-                  <span v-if="!row.real_name">{{ row.git_name || row.git_email }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="department" label="部门" width="120" />
-              <el-table-column prop="git_email" label="邮箱" min-width="180" />
-              <el-table-column prop="commit_count" label="提交数" width="90" align="right">
-                <template #default="{ row }">
-                  <el-tag type="primary" size="small">{{ row.commit_count }}</el-tag>
-                </template>
-              </el-table-column>
-              <el-table-column prop="first_commit_at" label="首次提交" width="110" />
-              <el-table-column prop="last_commit_at" label="最近提交" width="110" />
-            </el-table>
-          </div>
-        </el-collapse-transition>
-      </el-card>
-    </template>
-
-    <el-empty v-if="!loading && activeRepos.length === 0 && inactiveRepos.length === 0" description="暂无仓库数据" />
+    <el-empty v-if="!loading && filtered.length === 0" description="暂无仓库数据" />
   </div>
 </template>
 
@@ -266,15 +176,50 @@ const filtered = computed(() => {
   const all = !q ? repos.value : repos.value.filter(r =>
     r.full_name.toLowerCase().includes(q) || r.description?.toLowerCase().includes(q)
   )
-  // 分组：活跃 + 非活跃
-  const active = all.filter(r => r.is_active)
-  const inactive = all.filter(r => !r.is_active)
-  return [...active, ...inactive]
+
+  // Group by activity level
+  const levels = {
+    today: [],
+    this_week: [],
+    this_month: [],
+    pending: [],
+    unknown: []
+  }
+
+  for (const repo of all) {
+    const level = repo.activity?.level || 'unknown'
+    if (levels[level]) {
+      levels[level].push(repo)
+    }
+  }
+
+  // Flatten in order
+  return [
+    ...levels.today,
+    ...levels.this_week,
+    ...levels.this_month,
+    ...levels.pending,
+    ...levels.unknown
+  ]
 })
 
-const activeRepos = computed(() => filtered.value.filter(r => r.is_active))
+const activityGroups = computed(() => {
+  const groups = {
+    today: { label: '🔥 今天活跃', repos: [] },
+    this_week: { label: '📈 本周活跃', repos: [] },
+    this_month: { label: '⚙️ 本月活跃', repos: [] },
+    pending: { label: '⏳ 待同步', repos: [] },
+  }
 
-const inactiveRepos = computed(() => filtered.value.filter(r => !r.is_active))
+  for (const repo of filtered.value) {
+    const level = repo.activity?.level || 'unknown'
+    if (groups[level]) {
+      groups[level].repos.push(repo)
+    }
+  }
+
+  return groups
+})
 
 const doneCount = computed(() =>
   Object.values(syncJobs.value).filter(j => j.status === 'done' || j.status === 'failed').length

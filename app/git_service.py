@@ -73,6 +73,12 @@ def _repo_dir(config: RepositoryConfig, workspace: Path) -> Path:
     parsed = urlparse(config.url or "")
 
     # Handle SSH URL: git@github.com:WeFi-HLB/ai-ocr.git
+    if config.url and config.url.startswith("ssh://git@github.com/"):
+        path = config.url.removeprefix("ssh://git@github.com/").removesuffix("/")
+        parts = path.removesuffix(".git").split("/")
+        if len(parts) >= 2:
+            return workspace / parts[0] / parts[1]
+
     if config.url and config.url.startswith("git@"):
         # Extract path after the colon
         match = re.match(r"git@[^:]+:(.+?)(?:\.git)?/?$", config.url)
@@ -97,9 +103,23 @@ def _repo_dir(config: RepositoryConfig, workspace: Path) -> Path:
     return workspace / slug
 
 
-def ensure_repository(config: RepositoryConfig, workspace: Path) -> Path:
+def _https_url_for_token(url: str, token: str | None) -> str:
+    """GitHub App tokens work over HTTPS; normalize GitHub SSH URLs when present."""
+    if token and url.startswith("git@github.com:"):
+        return "https://github.com/" + url.removeprefix("git@github.com:")
+    if token and url.startswith("ssh://git@github.com/"):
+        return "https://github.com/" + url.removeprefix("ssh://git@github.com/")
+    return url
+
+
+def ensure_repository(config: RepositoryConfig, workspace: Path, *, allow_clone: bool = True) -> Path:
     target = _repo_dir(config, workspace)
+    remote_url = _https_url_for_token(config.url or "", config.auth_token)
     if (target / ".git").exists() or (target / "HEAD").exists():
+        if remote_url:
+            current_url = _run_git(["remote", "get-url", "origin"], target, check=False).strip()
+            if current_url and current_url != remote_url:
+                _run_git(["remote", "set-url", "origin", remote_url], target)
         if config.fetch:
             logger.info("正在获取仓库 %s (%s)", config.name, target)
             with _git_auth_env(config.auth_token) as env:
@@ -107,10 +127,12 @@ def ensure_repository(config: RepositoryConfig, workspace: Path) -> Path:
         return target
     if not config.url:
         raise GitError(f"仓库 {config.name} 不存在: {target}")
+    if not allow_clone:
+        raise GitError(f"仓库 {config.name} 尚未同步本地 mirror: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
     logger.info("正在克隆仓库 %s -> %s", config.url, target)
     with _git_auth_env(config.auth_token) as env:
-        _run_git(["clone", "--mirror", config.url, str(target)], workspace, env=env)
+        _run_git(["clone", "--mirror", remote_url, str(target)], workspace, env=env)
     return target
 
 
@@ -118,11 +140,19 @@ def _parse_date(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def scan_repository(config: RepositoryConfig, workspace: Path, target_date: date, timezone: tzinfo, *, end_date: date | None = None) -> RepositoryReport:
+def scan_repository(
+    config: RepositoryConfig,
+    workspace: Path,
+    target_date: date,
+    timezone: tzinfo,
+    *,
+    end_date: date | None = None,
+    allow_clone: bool = True,
+) -> RepositoryReport:
     try:
         _end = end_date if end_date is not None else target_date
         logger.info("扫描仓库 %s，日期 %s ~ %s", config.name, target_date, _end)
-        repo_dir = ensure_repository(config, workspace)
+        repo_dir = ensure_repository(config, workspace, allow_clone=allow_clone)
         branch = config.branch or "all branches"
         scan_refs = [config.branch] if config.branch else ["--all"]
         if config.fetch and config.branch:
@@ -135,22 +165,25 @@ def scan_repository(config: RepositoryConfig, workspace: Path, target_date: date
             [
                 "log",
                 *scan_refs,
+                "--numstat",
                 f"--since={start.isoformat()}",
                 f"--until={end.isoformat()}",
                 "--date=iso-strict",
-                "--format=%H%x1f%an%x1f%ae%x1f%aI%x1f%s",
+                "--format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%s",
             ],
             repo_dir,
         )
         commits: list[Commit] = []
-        for line in raw.splitlines():
-            fields = line.split("\x1f", 4)
+        for block in raw.split("\x1e"):
+            lines = [line for line in block.splitlines() if line.strip()]
+            if not lines:
+                continue
+            fields = lines[0].split("\x1f", 4)
             if len(fields) != 5:
                 continue
             sha, author_name, author_email, authored_at, subject = fields
-            stats = _run_git(["show", "--format=", "--numstat", sha], repo_dir)
             additions = deletions = files_changed = 0
-            for stat_line in stats.splitlines():
+            for stat_line in lines[1:]:
                 stat = stat_line.split("\t")
                 if len(stat) < 3 or not stat[0].isdigit() or not stat[1].isdigit():
                     continue

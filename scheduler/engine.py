@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from app.periods import resolve_period
 
 logger = logging.getLogger("hlb-git-pm.scheduler")
 
@@ -14,24 +15,7 @@ _app_config = None
 
 
 def _compute_date_range(report_type: str, timezone: str) -> tuple[date, date]:
-    tz = ZoneInfo(timezone)
-    today = datetime.now(tz).date()
-    if report_type == "daily":
-        target = today - timedelta(days=1)
-        return target, target
-    elif report_type == "weekly":
-        # Last Monday to Sunday
-        end = today - timedelta(days=1)
-        start = end - timedelta(days=6)
-        return start, end
-    elif report_type == "monthly":
-        # Previous month
-        first_of_this_month = today.replace(day=1)
-        end = first_of_this_month - timedelta(days=1)
-        start = end.replace(day=1)
-        return start, end
-    else:
-        return today - timedelta(days=1), today - timedelta(days=1)
+    return resolve_period(report_type, timezone)
 
 
 def _execute_scheduled_report(report_type: str, timezone: str) -> None:

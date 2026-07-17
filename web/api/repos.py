@@ -63,9 +63,10 @@ def _local_contributors(repo_dir: Path) -> tuple[list[dict], int]:
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=60,
+            timeout=120,  # Increased timeout for large repos
         )
         if out.returncode != 0:
+            logger.warning("git log 失败 %s (code %d): %s", repo_dir, out.returncode, out.stderr[:200])
             return [], 0
 
         seen_shas: set[str] = set()
@@ -100,9 +101,13 @@ def _local_contributors(repo_dir: Path) -> tuple[list[dict], int]:
                 entry["last_commit_at"] = date
 
         total_commits = len(seen_shas)
+        logger.debug("统计提交数 %s: %d 提交, %d 贡献者", repo_dir, total_commits, len(stats))
         return sorted(stats.values(), key=lambda x: x["commit_count"], reverse=True), total_commits
+    except subprocess.TimeoutExpired:
+        logger.warning("git log 超时 %s", repo_dir)
+        return [], 0
     except Exception as e:
-        logger.warning("git log failed for %s: %s", repo_dir, e)
+        logger.warning("git log 失败 %s: %s", repo_dir, e)
         return [], 0
 
 
@@ -115,12 +120,21 @@ def _local_repo_stats(repo_dir: Path) -> dict:
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=15,
+            timeout=30,
         )
-        branch_count = len([l for l in branch_out.stdout.splitlines() if l.strip()])
-    except Exception:
+        if branch_out.returncode != 0:
+            logger.warning("git for-each-ref 失败 %s (code %d)", repo_dir, branch_out.returncode)
+            branch_count = 0
+        else:
+            branch_count = len([l for l in branch_out.stdout.splitlines() if l.strip()])
+    except subprocess.TimeoutExpired:
+        logger.warning("git for-each-ref 超时 %s", repo_dir)
+        branch_count = 0
+    except Exception as e:
+        logger.warning("git for-each-ref 异常 %s: %s", repo_dir, e)
         branch_count = 0
 
+    logger.debug("统计分支数 %s: %d 个分支", repo_dir, branch_count)
     return {"branch_count": branch_count}
 
 
@@ -282,6 +296,57 @@ def _update_repo_after_sync(full_name: str, local_dir: Path) -> None:
 # API endpoints
 # ---------------------------------------------------------------------------
 
+def _get_activity_level(repo: Repository) -> dict:
+    """Calculate activity level aligned with report cadences (daily/weekly/monthly).
+
+    Returns: {
+        "level": "today" | "this_week" | "this_month" | "pending" | "unknown",
+        "label": "今天活跃" | "本周活跃" | "本月活跃" | "待同步" | "未知",
+        "days": days_since_push,
+        "color": "success" | "warning" | "danger" | "info",
+    }
+    """
+    # Check sync status first
+    if not repo.is_cloned or (repo.branch_count == 0 and repo.total_commits == 0):
+        return {
+            "level": "pending",
+            "label": "待同步",
+            "days": None,
+            "color": "danger",
+        }
+
+    if not repo.pushed_at:
+        return {
+            "level": "unknown",
+            "label": "未知",
+            "days": None,
+            "color": "info",
+        }
+
+    try:
+        pushed_dt = datetime.fromisoformat(repo.pushed_at.replace('Z', '+00:00'))
+        now = datetime.now(_tz.utc)
+        delta = now - pushed_dt
+        days = delta.days
+
+        if days < 1:
+            return {"level": "today", "label": "今天活跃", "days": days, "color": "success"}
+        elif days < 7:
+            return {"level": "this_week", "label": "本周活跃", "days": days, "color": "success"}
+        elif days < 30:
+            return {"level": "this_month", "label": "本月活跃", "days": days, "color": "warning"}
+        else:
+            # Anything older than a month is "待同步"
+            return {"level": "pending", "label": "待同步", "days": days, "color": "danger"}
+    except (ValueError, AttributeError):
+        return {
+            "level": "unknown",
+            "label": "未知",
+            "days": None,
+            "color": "info",
+        }
+
+
 def _build_repo_list(db: Session) -> list[dict]:
     """Build the repo list response from DB tables (zero subprocess calls)."""
     repos = db.query(Repository).filter(Repository.is_deleted == False).all()
@@ -311,22 +376,9 @@ def _build_repo_list(db: Session) -> list[dict]:
     for contribs in repo_contributors.values():
         contribs.sort(key=lambda x: x["commit_count"], reverse=True)
 
-    # Calculate active status: active if pushed within last 7 days
-    now = datetime.now(_tz.utc)
-    one_week_ago = now - timedelta(days=7)
-
     result = []
     for r in repos:
-        # Determine if repo is active (pushed within 7 days)
-        is_active = True
-        if r.pushed_at:
-            try:
-                pushed_dt = datetime.fromisoformat(r.pushed_at.replace('Z', '+00:00'))
-                is_active = pushed_dt > one_week_ago
-            except (ValueError, AttributeError):
-                is_active = False
-        else:
-            is_active = False
+        activity = _get_activity_level(r)
 
         result.append({
             "org_name": r.org_name,
@@ -340,16 +392,18 @@ def _build_repo_list(db: Session) -> list[dict]:
             "is_fork": r.is_fork,
             "clone_url": r.clone_url,
             "is_cloned": r.is_cloned,
-            "is_active": is_active,
+            "is_active": activity["level"] in ("today", "this_week", "this_month"),
+            "activity": activity,
             "branch_count": r.branch_count,
             "total_commits": r.total_commits,
             "contributors": repo_contributors.get(r.full_name, []),
         })
 
-    # Sort: active first, cloned first, then by pushed_at desc
+    # Sort: by activity level, then by cloned status, then by pushed_at desc
+    activity_order = {"today": 0, "this_week": 1, "this_month": 2, "pending": 3, "unknown": 4}
     result.sort(key=lambda r: r["pushed_at"], reverse=True)
     result.sort(key=lambda r: not r["is_cloned"])
-    result.sort(key=lambda r: not r["is_active"])
+    result.sort(key=lambda r: activity_order.get(r["activity"]["level"], 999))
 
     return result
 
@@ -411,9 +465,9 @@ def refresh_repos(
     # Create or update repos from GitHub
     for meta in repos_meta:
         org_name = meta.full_name.split("/")[0] if "/" in meta.full_name else ""
-        # Convert HTTPS to SSH for faster cloning
-        ssh_url = _convert_https_to_ssh(meta.clone_url)
-        local_dir = _repo_local_dir(ssh_url, workspace)
+        # Keep HTTPS URLs so GitHub App installation tokens can authenticate via GIT_ASKPASS.
+        clone_url = meta.clone_url
+        local_dir = _repo_local_dir(clone_url, workspace)
         is_cloned = local_dir is not None
 
         repo = db.query(Repository).filter(Repository.full_name == meta.full_name).first()
@@ -427,7 +481,7 @@ def refresh_repos(
             repo.stars = meta.stars
             repo.is_archived = meta.is_archived
             repo.is_fork = meta.is_fork
-            repo.clone_url = ssh_url
+            repo.clone_url = clone_url
             # Recheck if locally cloned (might have been cloned since last refresh)
             repo.is_cloned = is_cloned
             repo.is_deleted = False  # restore if was marked deleted before
@@ -444,7 +498,7 @@ def refresh_repos(
                 stars=meta.stars,
                 is_archived=meta.is_archived,
                 is_fork=meta.is_fork,
-                clone_url=ssh_url,
+                clone_url=clone_url,
                 is_cloned=is_cloned,  # check if already cloned locally
                 is_deleted=False,
                 branch_count=0,        # will be filled on sync
@@ -513,6 +567,26 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
     workspace = Path(_app_config.workspace).expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
 
+    def _needs_sync(row: Repository | None, repo: dict) -> bool:
+        """Fetch only when the local mirror cannot be trusted as current."""
+        local_dir = _repo_local_dir(repo["clone_url"], workspace)
+        if local_dir is None or row is None or not row.is_cloned or not row.synced_at:
+            return True
+        pushed_at = str(repo.get("pushed_at") or row.pushed_at or "")
+        if not pushed_at:
+            return True
+        try:
+            pushed_dt = datetime.fromisoformat(pushed_at.replace("Z", "+00:00"))
+            synced_dt = datetime.fromisoformat(str(row.synced_at).replace("Z", "+00:00"))
+            if pushed_dt.tzinfo is None:
+                pushed_dt = pushed_dt.replace(tzinfo=_tz.utc)
+            if synced_dt.tzinfo is None:
+                synced_dt = synced_dt.replace(tzinfo=_tz.utc)
+            return pushed_dt > synced_dt
+        except (TypeError, ValueError):
+            logger.warning("无法解析仓库时间戳，强制同步: %s pushed_at=%r synced_at=%r", repo["full_name"], pushed_at, row.synced_at)
+            return True
+
     def _sync_one(r: dict) -> None:
         full_name = r["full_name"]
         session = get_session()
@@ -528,6 +602,23 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
                 job = SyncJob(repo_name=full_name, status="syncing", started_at=datetime.now(_tz.utc).isoformat())
                 session.add(job)
             session.commit()
+
+            repo_row = session.query(Repository).filter(Repository.full_name == full_name).first()
+            should_sync = _needs_sync(repo_row, r)
+            if not should_sync:
+                with _sync_lock:
+                    _sync_jobs[full_name] = {
+                        "status": "done",
+                        "error": None,
+                        "cached": True,
+                        "finished_at": time.time(),
+                    }
+                job.status = "done"
+                job.error = ""
+                job.finished_at = datetime.now(_tz.utc).isoformat()
+                session.commit()
+                logger.info("同步命中缓存，跳过 fetch: %s", full_name)
+                return
 
             cfg = RepositoryConfig(
                 name=full_name,
@@ -600,18 +691,28 @@ def sync_repos(
 
     # Determine which repos to sync
     if full_names:
-        repos_to_sync = [{"full_name": n, "clone_url": _clone_url_from_name(n, db)} for n in full_names]
+        repos_to_sync = []
+        for name in full_names:
+            row = db.query(Repository).filter(Repository.full_name == name).first()
+            repos_to_sync.append({
+                "full_name": name,
+                "clone_url": row.clone_url if row and row.clone_url else _clone_url_from_name(name, db),
+                "pushed_at": row.pushed_at if row else "",
+            })
     else:
         # Full sync: read from DB first
         db_repos = db.query(Repository).all()
         if db_repos:
-            repos_to_sync = [{"full_name": r.full_name, "clone_url": r.clone_url} for r in db_repos]
+            repos_to_sync = [
+                {"full_name": r.full_name, "clone_url": r.clone_url, "pushed_at": r.pushed_at, "synced_at": r.synced_at, "is_cloned": r.is_cloned}
+                for r in db_repos
+            ]
         else:
             # DB empty: fallback to GitHub API
             from app.github_app import list_repositories_with_meta, GitHubAppError
             try:
                 metas = list_repositories_with_meta(_app_config.github)
-                repos_to_sync = [{"full_name": m.full_name, "clone_url": m.clone_url} for m in metas]
+                repos_to_sync = [{"full_name": m.full_name, "clone_url": m.clone_url, "pushed_at": m.pushed_at} for m in metas]
             except GitHubAppError as e:
                 logger.warning("GitHub API 失败 [%s]: %s", _app_config.github.organization, e)
                 repos_to_sync = []
@@ -654,6 +755,8 @@ def sync_status(
             "started_at": job.started_at,
             "finished_at": job.finished_at,
         }
+        if _sync_jobs.get(job.repo_name, {}).get("cached"):
+            result[job.repo_name]["cached"] = True
 
     return result
 

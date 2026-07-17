@@ -12,7 +12,7 @@ from .config import AppConfig, load_config
 from .emailer import send_email
 from .github_app import discover_repositories
 from .git_service import scan_repository
-from .models import DailyReport, MemberInfo, PeriodReport
+from .models import DailyReport, MemberInfo, PeriodReport, RepositoryReport
 from .report import render_html, render_markdown, render_period_html, render_period_markdown
 from .workflow import WorkflowReporter
 
@@ -32,6 +32,9 @@ def run_once(
     dry_run: bool = False,
     output_dir: str = ".data/reports",
     workflow: WorkflowReporter | None = None,
+    snapshot_repositories: list[RepositoryReport] | None = None,
+    snapshot_include_empty: bool = False,
+    snapshot_activity_window: str | None = None,
 ) -> DailyReport | PeriodReport:
     timezone = ZoneInfo(config.timezone)
     workspace = Path(config.workspace).expanduser().resolve()
@@ -58,87 +61,131 @@ def run_once(
             },
         )
 
-    repository_configs = list(config.repositories)
-    if workflow:
-        workflow.start(
-            "discover_repositories",
-            {
-                "organization": config.github.organization if config.github else None,
-                "static_repositories": len(config.repositories),
-                "requested_repositories": repo_names or [],
-            },
-        )
-    try:
-        if config.github:
-            discovered = discover_repositories(config.github)
-            static_by_name = {repo.name: repo for repo in repository_configs}
-            static_by_name.update({repo.name: repo for repo in discovered})
-            repository_configs = list(static_by_name.values())
-            logger.info("GitHub App 已发现 %d 个可访问仓库", len(discovered))
-
-        # Filter by requested repo names
+    repositories: list[RepositoryReport]
+    if snapshot_repositories is not None:
+        # The active-project filter already scanned these repositories. Reuse its
+        # exact results so report generation never performs a second Git scan.
+        repositories = list(snapshot_repositories) if snapshot_include_empty else [repo for repo in snapshot_repositories if repo.commits or repo.error]
         if repo_names:
-            repo_set = set(repo_names)
-            repository_configs = [r for r in repository_configs if r.name in repo_set]
-            logger.info("按名称过滤后剩余 %d 个仓库", len(repository_configs))
-
+            selected = set(repo_names)
+            repositories = [repo for repo in repositories if repo.name in selected]
+        logger.info("复用活跃项目筛选快照：%d 个仓库", len(repositories))
         if workflow:
+            workflow.start(
+                "discover_repositories",
+                {
+                    "source": "active_snapshot",
+                    "snapshot_repositories": len(snapshot_repositories),
+                    "requested_repositories": repo_names or [],
+                    "activity_window": snapshot_activity_window,
+                },
+            )
             workflow.success(
                 "discover_repositories",
                 {
-                    "discovered_repositories": len(repository_configs),
-                    "selected_repositories": [repo.name for repo in repository_configs],
-                    "fetch_enabled": not skip_fetch,
+                    "source": "active_snapshot",
+                    "selected_repositories": [repo.name for repo in repositories],
+                    "activity_window": snapshot_activity_window,
                 },
             )
-    except Exception as error:
-        if workflow:
-            workflow.fail("discover_repositories", str(error))
-        raise
-
-    # Apply skip_fetch: override fetch flag to False on each config
-    if skip_fetch:
-        import dataclasses
-        repository_configs = [dataclasses.replace(r, fetch=False) for r in repository_configs]
-        logger.info("skip_fetch=True，跳过 git fetch/clone")
-
-    repositories = []
-    if workflow:
-        workflow.start(
-            "scan_repositories",
-            {
-                "repository_count": len(repository_configs),
-                "workspace": str(workspace),
-                "fetch_latest": not skip_fetch,
-                "refs": "all" if all(not repo.branch for repo in repository_configs) else "configured",
-            },
-        )
-    scan_failed = 0
-    try:
-        for index, repo_cfg in enumerate(repository_configs, start=1):
-            result = scan_repository(repo_cfg, workspace, target_date, timezone, end_date=_end)
-            if result.error:
-                scan_failed += 1
-                logger.warning("仓库 %s 扫描失败: %s", repo_cfg.name, result.error)
-            repositories.append(result)
-            if workflow and hasattr(workflow, "repository_progress"):
-                workflow.repository_progress(index, len(repository_configs), repo_cfg.name, scan_failed)
-        if workflow:
+            workflow.start("scan_repositories", {"source": "active_snapshot", "repository_count": len(repositories), "fetch_latest": False})
+            scan_failed = sum(1 for repo in repositories if repo.error)
             scan_output = {
+                "source": "active_snapshot",
                 "total_repositories": len(repositories),
                 "successful_repositories": len(repositories) - scan_failed,
                 "failed_repositories": scan_failed,
                 "commits_found": sum(len(repo.commits) for repo in repositories),
                 "files_changed": sum(commit.files_changed for repo in repositories for commit in repo.commits),
             }
-            if scan_failed:
-                workflow.warning("scan_repositories", scan_output)
-            else:
-                workflow.success("scan_repositories", scan_output)
-    except Exception as error:
+            (workflow.warning if scan_failed else workflow.success)("scan_repositories", scan_output)
+    else:
+        repository_configs = list(config.repositories)
         if workflow:
-            workflow.fail("scan_repositories", str(error))
-        raise
+            workflow.start(
+                "discover_repositories",
+                {
+                    "organization": config.github.organization if config.github else None,
+                    "static_repositories": len(config.repositories),
+                    "requested_repositories": repo_names or [],
+                },
+            )
+        try:
+            if config.github:
+                discovered = discover_repositories(config.github)
+                static_by_name = {repo.name: repo for repo in repository_configs}
+                static_by_name.update({repo.name: repo for repo in discovered})
+                repository_configs = list(static_by_name.values())
+                logger.info("GitHub App 已发现 %d 个可访问仓库", len(discovered))
+
+            if repo_names:
+                repo_set = set(repo_names)
+                repository_configs = [r for r in repository_configs if r.name in repo_set]
+                logger.info("按名称过滤后剩余 %d 个仓库", len(repository_configs))
+
+            if workflow:
+                workflow.success(
+                    "discover_repositories",
+                    {
+                        "discovered_repositories": len(repository_configs),
+                        "selected_repositories": [repo.name for repo in repository_configs],
+                        "fetch_enabled": not skip_fetch,
+                    },
+                )
+        except Exception as error:
+            if workflow:
+                workflow.fail("discover_repositories", str(error))
+            raise
+
+        if skip_fetch:
+            import dataclasses
+            repository_configs = [dataclasses.replace(r, fetch=False) for r in repository_configs]
+            logger.info("skip_fetch=True，跳过 git fetch/clone")
+
+        repositories = []
+        if workflow:
+            workflow.start(
+                "scan_repositories",
+                {
+                    "repository_count": len(repository_configs),
+                    "workspace": str(workspace),
+                    "fetch_latest": not skip_fetch,
+                    "refs": "all" if all(not repo.branch for repo in repository_configs) else "configured",
+                },
+            )
+        scan_failed = 0
+        try:
+            for index, repo_cfg in enumerate(repository_configs, start=1):
+                result = scan_repository(
+                    repo_cfg,
+                    workspace,
+                    target_date,
+                    timezone,
+                    end_date=_end,
+                    allow_clone=not skip_fetch,
+                )
+                if result.error:
+                    scan_failed += 1
+                    logger.warning("仓库 %s 扫描失败: %s", repo_cfg.name, result.error)
+                repositories.append(result)
+                if workflow and hasattr(workflow, "repository_progress"):
+                    workflow.repository_progress(index, len(repository_configs), repo_cfg.name, scan_failed)
+            if workflow:
+                scan_output = {
+                    "total_repositories": len(repositories),
+                    "successful_repositories": len(repositories) - scan_failed,
+                    "failed_repositories": scan_failed,
+                    "commits_found": sum(len(repo.commits) for repo in repositories),
+                    "files_changed": sum(commit.files_changed for repo in repositories for commit in repo.commits),
+                }
+                if scan_failed:
+                    workflow.warning("scan_repositories", scan_output)
+                else:
+                    workflow.success("scan_repositories", scan_output)
+        except Exception as error:
+            if workflow:
+                workflow.fail("scan_repositories", str(error))
+            raise
 
     # Build the appropriate report object
     if workflow:

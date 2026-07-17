@@ -87,6 +87,18 @@ class ReportStep(Base):
     duration_ms = Column(Integer, nullable=True)
 
 
+class ReportSelectionSnapshot(Base):
+    """Repository scan results captured by the active-project filter."""
+    __tablename__ = "report_selection_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    report_type = Column(String, nullable=False, index=True)
+    period_start = Column(String, nullable=False)
+    period_end = Column(String, nullable=False)
+    repositories_json = Column(Text, nullable=False, default="[]")
+    created_at = Column(String, nullable=False)
+
+
 class Repository(Base):
     """Cached repository metadata — populated from GitHub API and local git stats."""
     __tablename__ = "repositories"

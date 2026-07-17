@@ -146,12 +146,10 @@ def discover_repositories(config: GitHubConfig) -> tuple[RepositoryConfig, ...]:
             clone_url = str(item.get("clone_url") or "")
             if not name or not clone_url:
                 continue
-            # Convert HTTPS to SSH for faster cloning
-            ssh_url = _convert_https_to_ssh(clone_url)
             repositories.append(
                 RepositoryConfig(
                     name=name,
-                    url=ssh_url,
+                    url=clone_url,
                     branch="",
                     fetch=True,
                     auth_token=token,
@@ -186,8 +184,6 @@ def list_repositories_with_meta(config: GitHubConfig) -> tuple[RepoMeta, ...]:
             clone_url = str(item.get("clone_url") or "")
             if not full_name or not clone_url:
                 continue
-            # Convert HTTPS to SSH for faster cloning
-            ssh_url = _convert_https_to_ssh(clone_url)
             result.append(RepoMeta(
                 full_name=full_name,
                 description=str(item.get("description") or ""),
@@ -197,7 +193,7 @@ def list_repositories_with_meta(config: GitHubConfig) -> tuple[RepoMeta, ...]:
                 stars=int(item.get("stargazers_count") or 0),
                 is_archived=bool(item.get("archived", False)),
                 is_fork=bool(item.get("fork", False)),
-                clone_url=ssh_url,
+                clone_url=clone_url,
             ))
         if len(items) < 100:
             break

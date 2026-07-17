@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
 from datetime import date, datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from ..db_models import Member, Recipient, ReportHistory, ReportStep, Repository, User
+from ..db_models import Member, Recipient, ReportHistory, ReportSelectionSnapshot, ReportStep, Repository, User
 from ..deps import get_current_user, get_db
-from ..schemas import ReportDetail, ReportOut, ReportStepOut, ReportTrigger
+from ..schemas import ActiveRepositoriesRequest, ReportDetail, ReportOut, ReportStepOut, ReportTrigger
 
 logger = logging.getLogger("hlb-git-pm.api.reports")
+
+# These ranges intentionally mirror the mutually exclusive labels on the
+# repository board: very_active, active, and normal.
+ACTIVITY_WINDOWS = {"week": (0, 7), "half_month": (7, 15), "month": (15, 30)}
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -22,6 +29,86 @@ _app_config = None
 def set_app_config(config):
     global _app_config
     _app_config = config
+
+
+def _serialize_repository_reports(reports, *, include_empty: bool = False, activity_window: str | None = None) -> str:
+    """Persist the complete scan result, including commit numstat data."""
+    payload = [
+            {
+                "name": report.name,
+                "branch": report.branch,
+                "error": report.error,
+                "commits": [
+                    {
+                        "repository": commit.repository,
+                        "sha": commit.sha,
+                        "author_name": commit.author_name,
+                        "author_email": commit.author_email,
+                        "authored_at": commit.authored_at.isoformat(),
+                        "subject": commit.subject,
+                        "files_changed": commit.files_changed,
+                        "additions": commit.additions,
+                        "deletions": commit.deletions,
+                    }
+                    for commit in report.commits
+                ],
+            }
+            for report in reports
+        ]
+    # A metadata envelope keeps this compatible with snapshots created before
+    # activity-window filtering was introduced.
+    return json.dumps(
+        {"repositories": payload, "include_empty": include_empty, "activity_window": activity_window},
+        ensure_ascii=False,
+    )
+
+
+def _deserialize_repository_reports(value: str) -> tuple[list, bool, str | None]:
+    from app.models import Commit, RepositoryReport
+
+    payload = json.loads(value or "[]")
+    if isinstance(payload, dict):
+        items = payload.get("repositories", [])
+        include_empty = bool(payload.get("include_empty", False))
+        activity_window = payload.get("activity_window")
+    else:
+        items = payload
+        include_empty = False
+        activity_window = None
+    reports = []
+    for item in items:
+        commits = [
+            Commit(
+                repository=str(commit.get("repository") or item.get("name") or ""),
+                sha=str(commit.get("sha") or ""),
+                author_name=str(commit.get("author_name") or ""),
+                author_email=str(commit.get("author_email") or ""),
+                authored_at=datetime.fromisoformat(str(commit["authored_at"]).replace("Z", "+00:00")),
+                subject=str(commit.get("subject") or ""),
+                files_changed=int(commit.get("files_changed") or 0),
+                additions=int(commit.get("additions") or 0),
+                deletions=int(commit.get("deletions") or 0),
+            )
+            for commit in item.get("commits", [])
+        ]
+        reports.append(RepositoryReport(str(item.get("name") or ""), str(item.get("branch") or "all branches"), commits, item.get("error")))
+    return reports, include_empty, activity_window
+
+
+def _in_activity_window(repo: Repository | None, window: str) -> bool:
+    """Use the same pushed_at semantics as the repository board labels."""
+    if repo is None or not repo.is_cloned or not repo.pushed_at:
+        return False
+    try:
+        pushed_at = datetime.fromisoformat(repo.pushed_at.replace("Z", "+00:00"))
+        if pushed_at.tzinfo is None:
+            pushed_at = pushed_at.replace(tzinfo=timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - pushed_at).total_seconds()
+        lower_days, upper_days = ACTIVITY_WINDOWS[window]
+        age_days = age_seconds / 86400
+        return lower_days <= age_days < upper_days
+    except (TypeError, ValueError):
+        return False
 
 
 @router.get("", response_model=list[ReportOut])
@@ -61,6 +148,103 @@ def list_repo_names(
     # Fall back to static config
     names = [r.name for r in _app_config.repositories]
     return sorted(names)
+
+
+@router.post("/active-repositories")
+def list_active_repositories(
+    body: ActiveRepositoriesRequest,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Scan the selected period and return only repositories with commits."""
+    if _app_config is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="配置未加载")
+
+    from app.github_app import discover_repositories
+    from app.git_service import scan_repository
+    from app.periods import resolve_period
+
+    start, end = resolve_period(body.report_type, _app_config.timezone)
+    repository_configs = list(_app_config.repositories)
+    if _app_config.github:
+        discovered = discover_repositories(_app_config.github)
+        by_name = {repo.name: repo for repo in repository_configs}
+        by_name.update({repo.name: repo for repo in discovered})
+        repository_configs = list(by_name.values())
+
+    if body.activity_window:
+        repo_rows = {
+            row.full_name: row
+            for row in db.query(Repository).filter(Repository.is_deleted == False).all()
+        }
+        repository_configs = [
+            config for config in repository_configs
+            if _in_activity_window(repo_rows.get(config.name), body.activity_window)
+        ]
+
+    if body.skip_fetch:
+        import dataclasses
+        repository_configs = [dataclasses.replace(repo, fetch=False) for repo in repository_configs]
+
+    workspace = Path(_app_config.workspace).expanduser().resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    reports = [
+        scan_repository(
+            config,
+            workspace,
+            start,
+            ZoneInfo(_app_config.timezone),
+            end_date=end,
+            allow_clone=not body.skip_fetch,
+        )
+        for config in repository_configs
+    ]
+    active = []
+    failed = []
+    for report in reports:
+        if report.error:
+            failed.append({"name": report.name, "error": report.error})
+        elif report.commits or body.activity_window:
+            active.append(
+                {
+                    "name": report.name,
+                    "branch": report.branch,
+                    "commits": len(report.commits),
+                    "contributors": len({(c.author_email or c.author_name).lower() for c in report.commits}),
+                    "additions": sum(c.additions for c in report.commits),
+                    "deletions": sum(c.deletions for c in report.commits),
+                    "last_commit_at": (
+                        max((c.authored_at for c in report.commits), default=None).isoformat()
+                        if report.commits else None
+                    ),
+                }
+            )
+    active.sort(key=lambda item: (-item["commits"], item["name"]))
+    snapshot = ReportSelectionSnapshot(
+        report_type=body.report_type,
+        period_start=start.isoformat(),
+        period_end=end.isoformat(),
+        repositories_json=_serialize_repository_reports(
+            reports,
+            include_empty=bool(body.activity_window),
+            activity_window=body.activity_window,
+        ),
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    return {
+        "report_type": body.report_type,
+        "period_start": start.isoformat(),
+        "period_end": end.isoformat(),
+        "scanned_repositories": len(reports),
+        "active_repositories": active,
+        "failed_repositories": failed,
+        "snapshot_id": snapshot.id,
+        "source": "local_cache" if body.skip_fetch else "synchronized",
+        "activity_window": body.activity_window,
+    }
 
 
 @router.get("/{report_id}", response_model=ReportDetail)
@@ -105,8 +289,23 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
     if _app_config is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="配置未加载")
 
-    start = date.fromisoformat(body.start_date)
-    end = date.fromisoformat(body.end_date) if body.end_date else start
+    from app.periods import resolve_period
+    start, end = resolve_period(body.report_type, _app_config.timezone)
+
+    snapshot_repositories = None
+    snapshot_include_empty = False
+    if body.snapshot_id is not None:
+        snapshot = db.query(ReportSelectionSnapshot).filter(ReportSelectionSnapshot.id == body.snapshot_id).first()
+        if snapshot is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="活跃项目筛选结果不存在或已过期")
+        if snapshot.report_type != body.report_type or snapshot.period_start != start.isoformat() or snapshot.period_end != end.isoformat():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="活跃项目筛选结果与当前报告周期不一致，请重新筛选")
+        try:
+            snapshot_repositories, snapshot_include_empty, snapshot_activity_window = _deserialize_repository_reports(snapshot.repositories_json)
+            if snapshot_activity_window != body.activity_window:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="仓库活跃筛选条件已变化，请重新筛选")
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError) as error:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"活跃项目筛选结果无效: {error}") from error
 
     record = ReportHistory(
         org_name="",
@@ -168,6 +367,9 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
                 skip_fetch=skip_fetch,
                 dry_run=dry_run,
                 workflow=workflow,
+                snapshot_repositories=snapshot_repositories,
+                snapshot_include_empty=snapshot_include_empty,
+                snapshot_activity_window=body.activity_window,
             )
 
             rec = session.query(ReportHistory).filter(ReportHistory.id == report_id).first()
@@ -183,7 +385,13 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
                     rec.html = render_html(result)
                 rec.ai_analysis = result.ai_analysis
                 rec.total_commits = result.total_commits
-                rec.title = f"{report_type} {start.isoformat()} ~ {end.isoformat()}"
+                activity_label = {
+                    "week": "近一周活跃",
+                    "half_month": "近半月活跃",
+                    "month": "近一个月活跃",
+                }.get(body.activity_window)
+                scope = f"（{activity_label}）" if activity_label else ""
+                rec.title = f"{report_type}{scope} {start.isoformat()} ~ {end.isoformat()}"
                 rec.status = "completed" if dry_run else "sent"
                 if not dry_run and recipient_emails:
                     rec.email_sent_at = datetime.now(timezone.utc).isoformat()
@@ -243,6 +451,7 @@ def resend_report(report_id: int, db: Session = Depends(get_db), _user: User = D
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="没有可用的收件人")
 
     from app.emailer import send_email
+    from app.report import refresh_ai_section_html
     from app.config import EmailConfig
 
     email_cfg = EmailConfig(
@@ -256,10 +465,12 @@ def resend_report(report_id: int, db: Session = Depends(get_db), _user: User = D
         use_ssl=_app_config.email.use_ssl,
     )
     subject = report.title or f"报告重发 {report.period_start} ~ {report.period_end}"
-    send_email(email_cfg, subject, report.markdown, report.html)
+    repaired_html = refresh_ai_section_html(report.html, report.ai_analysis)
+    send_email(email_cfg, subject, report.markdown, repaired_html)
 
     report.email_sent_at = datetime.now(timezone.utc).isoformat()
     report.status = "sent"
+    report.html = repaired_html
     db.commit()
     db.refresh(report)
     return report

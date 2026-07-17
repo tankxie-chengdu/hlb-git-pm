@@ -3,7 +3,7 @@ import unittest
 
 from app.ai import fallback_analysis
 from app.models import Commit, DailyReport, PeriodReport, RepositoryReport
-from app.report import render_markdown, render_period_markdown
+from app.report import refresh_ai_section_html, render_html, render_markdown, render_period_markdown
 
 
 class ReportTests(unittest.TestCase):
@@ -41,3 +41,23 @@ class ReportTests(unittest.TestCase):
         self.assertIn("活跃", markdown)
         self.assertIn("Alice", markdown)
         self.assertIn("+10/-3", markdown)
+
+    def test_html_renders_ai_markdown_as_html(self):
+        report = DailyReport(
+            "2026-07-15",
+            datetime.now(timezone.utc),
+            [RepositoryReport("demo", "main")],
+        )
+        report.ai_analysis = "### 重点\n\n- **完成** 登录流程"
+        html = render_html(report)
+        self.assertIn("<h3>重点</h3>", html)
+        self.assertIn("<strong>完成</strong>", html)
+        self.assertNotIn("### 重点", html)
+        report.ai_analysis += "\n<script>alert(1)</script>"
+        self.assertNotIn("<script>", render_html(report))
+
+    def test_refresh_ai_section_repairs_saved_html(self):
+        old_html = '<section style="x"><h2>1. 执行摘要</h2>### 旧格式<br></section>'
+        repaired = refresh_ai_section_html(old_html, "### 新格式\n\n- **完成**")
+        self.assertIn("<h3>新格式</h3>", repaired)
+        self.assertNotIn("### 新格式", repaired)
