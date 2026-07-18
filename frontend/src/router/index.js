@@ -19,7 +19,8 @@ const routes = [
       { path: 'schedules', name: 'Schedules', component: () => import('../views/SchedulesView.vue') },
       { path: 'reports', name: 'Reports', component: () => import('../views/ReportsView.vue') },
       { path: 'reports/:id', name: 'ReportDetail', component: () => import('../views/ReportDetailView.vue'), props: true },
-      { path: 'reports/trigger', name: 'ReportTrigger', component: () => import('../views/ReportTriggerView.vue') }
+      { path: 'reports/trigger', name: 'ReportTrigger', component: () => import('../views/ReportTriggerView.vue') },
+      { path: 'settings', name: 'Settings', component: () => import('../views/SettingsView.vue') }
     ]
   }
 ]

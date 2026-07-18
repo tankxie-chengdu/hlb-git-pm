@@ -555,6 +555,7 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
     from app.git_service import ensure_repository
     from app.config import RepositoryConfig
     from web.database import get_session
+    from web.db_models import ProxyConfig
 
     gh_cfg = _app_config.github
     token = ""
@@ -566,6 +567,22 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
 
     workspace = Path(_app_config.workspace).expanduser().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
+
+    # Get proxy configuration
+    proxy_config = None
+    try:
+        db = get_session()
+        proxy = db.query(ProxyConfig).first()
+        if proxy:
+            proxy_config = {
+                "http_proxy": proxy.http_proxy,
+                "https_proxy": proxy.https_proxy,
+                "no_proxy": proxy.no_proxy,
+                "enabled": proxy.enabled,
+            }
+        db.close()
+    except Exception as e:
+        logger.warning("获取代理配置失败: %s", e)
 
     def _needs_sync(row: Repository | None, repo: dict) -> bool:
         """Fetch only when the local mirror cannot be trusted as current."""
@@ -627,7 +644,7 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
                 fetch=True,
                 auth_token=token,
             )
-            ensure_repository(cfg, workspace)
+            ensure_repository(cfg, workspace, proxy_config=proxy_config)
             local_dir = _repo_local_dir(r["clone_url"], workspace)
             if local_dir:
                 _persist_contributors(full_name, local_dir)

@@ -151,3 +151,15 @@ class SyncJob(Base):
     error = Column(String, nullable=False, default="")
     started_at = Column(String, nullable=False, default="")
     finished_at = Column(String, nullable=False, default="")
+
+
+class ProxyConfig(Base):
+    """Global proxy settings for HTTP/HTTPS operations."""
+    __tablename__ = "proxy_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    http_proxy = Column(String, nullable=False, default="")      # e.g. http://127.0.0.1:7897
+    https_proxy = Column(String, nullable=False, default="")     # e.g. http://127.0.0.1:7897
+    no_proxy = Column(String, nullable=False, default="")        # comma-separated domains to bypass
+    enabled = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(String, nullable=False, default="")

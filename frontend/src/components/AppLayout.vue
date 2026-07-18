@@ -39,6 +39,11 @@
           <el-icon><VideoPlay /></el-icon>
           <span>手动触发</span>
         </el-menu-item>
+        <el-divider style="margin: 8px 0; background: #475669" />
+        <el-menu-item index="/settings">
+          <el-icon><Setting /></el-icon>
+          <span>系统设置</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>
@@ -57,7 +62,7 @@
 import { useRoute, useRouter } from 'vue-router'
 import { onMounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { DataAnalysis, User, Message, Timer, Document, VideoPlay, Grid } from '@element-plus/icons-vue'
+import { DataAnalysis, User, Message, Timer, Document, VideoPlay, Grid, Setting } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
