@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 logger = logging.getLogger("hlb-git-pm.database")
@@ -35,9 +35,20 @@ def init_db(db_path: str = ".data/hlb-git-pm.db") -> None:
     from . import db_models  # noqa: F401 — ensure tables are registered
 
     Base.metadata.create_all(bind=_engine)
+    _ensure_compat_columns()
     logger.info("数据库已初始化: %s", path.resolve())
 
     _seed_default_admin()
+
+
+def _ensure_compat_columns() -> None:
+    """Add lightweight columns for installations initialized via create_all."""
+    inspector = inspect(_engine)
+    columns = {column["name"] for column in inspector.get_columns("report_history")}
+    if "selection_snapshot_id" not in columns:
+        with _engine.begin() as connection:
+            connection.execute(text("ALTER TABLE report_history ADD COLUMN selection_snapshot_id INTEGER"))
+        logger.info("已补充 report_history.selection_snapshot_id 列")
 
 
 def get_engine():

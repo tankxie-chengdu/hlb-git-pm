@@ -3,6 +3,7 @@ import unittest
 
 from app.ai import fallback_analysis
 from app.models import Commit, DailyReport, PeriodReport, RepositoryReport
+from app.ai import context_commit_count
 from app.report import refresh_ai_section_html, render_html, render_markdown, render_period_markdown
 
 
@@ -61,3 +62,27 @@ class ReportTests(unittest.TestCase):
         repaired = refresh_ai_section_html(old_html, "### 新格式\n\n- **完成**")
         self.assertIn("<h3>新格式</h3>", repaired)
         self.assertNotIn("### 新格式", repaired)
+
+    def test_trend_uses_committer_time_when_available(self):
+        commit = Commit(
+            "demo",
+            "abcdef123",
+            "Alice",
+            "alice@example.com",
+            datetime(2026, 6, 24, tzinfo=timezone.utc),
+            "merged change",
+            1,
+            1,
+            0,
+            datetime(2026, 7, 7, tzinfo=timezone.utc),
+        )
+        report = PeriodReport("weekly", "2026-07-06", "2026-07-12", datetime.now(timezone.utc), [RepositoryReport("demo", "main", [commit])])
+        self.assertEqual(report.daily_trend[0]["date"], "2026-07-07")
+
+    def test_ai_context_reports_omitted_commit_count(self):
+        commits = [
+            Commit("demo", str(index), "Alice", "alice@example.com", datetime.now(timezone.utc), str(index))
+            for index in range(3)
+        ]
+        report = PeriodReport("weekly", "2026-07-06", "2026-07-12", datetime.now(timezone.utc), [RepositoryReport("demo", "main", commits)])
+        self.assertEqual(context_commit_count(report, 2), 2)

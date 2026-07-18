@@ -65,7 +65,7 @@
             <span class="step-main">
               <span class="step-name">{{ step.sequence }}. {{ step.step_name }}</span>
               <span class="step-meta">
-                {{ stepStatusLabel(step.status) }}
+                {{ stepStatusLabel(step.status, step) }}
                 <template v-if="step.duration_ms != null"> · {{ formatDuration(step.duration_ms) }}</template>
               </span>
               <el-progress
@@ -84,7 +84,7 @@
           <template v-if="selectedStep">
             <div class="section-title">
               <span>{{ selectedStep.step_name }}</span>
-              <el-tag :type="stepTag(selectedStep.status)" size="small">{{ stepStatusLabel(selectedStep.status) }}</el-tag>
+              <el-tag :type="stepTag(selectedStep.status)" size="small">{{ stepStatusLabel(selectedStep.status, selectedStep) }}</el-tag>
             </div>
 
             <el-descriptions :column="2" border size="small" class="step-descriptions">
@@ -160,7 +160,10 @@ const totalDuration = computed(() => {
 function typeLabel(t) { return { daily: '日报', weekly: '周报', monthly: '月报' }[t] || t }
 function statusLabel(s) { return { running: '运行中', completed: '已完成', sent: '已发送', failed: '失败' }[s] || s }
 function statusTag(s) { return { running: 'warning', completed: 'success', sent: 'success', failed: 'danger' }[s] || 'info' }
-function stepStatusLabel(s) { return { pending: '等待中', running: '执行中', success: '成功', warning: '部分成功', failed: '失败', skipped: '已跳过' }[s] || s }
+function stepStatusLabel(s, step) {
+  if (s === 'skipped' && step?.output_summary?.operation === 'reuse_snapshot') return '已复用快照'
+  return { pending: '等待中', running: '执行中', success: '成功', warning: '部分成功', failed: '失败', skipped: '已跳过' }[s] || s
+}
 function stepTag(s) { return { pending: 'info', running: 'warning', success: 'success', warning: 'warning', failed: 'danger', skipped: 'info' }[s] || 'info' }
 function formatTime(value) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-' }
 function formatDuration(ms) {
@@ -173,9 +176,9 @@ function formatDuration(ms) {
 function prettyJson(value) { return JSON.stringify(value || {}, null, 2) }
 function stepSummary(step) {
   const output = step.output_summary || {}
-  if (step.step_key === 'scan_repositories' && output.total_repositories != null) return `${output.completed_repositories ?? output.total_repositories}/${output.total_repositories} 仓库`
+  if (step.step_key === 'scan_repositories' && output.total_repositories != null) return `${output.completed_repositories ?? output.total_repositories}/${output.total_repositories} 仓库${output.operation === 'reuse_snapshot' ? '（复用快照）' : ''}`
   if (step.step_key === 'aggregate_metrics' && output.commits != null) return `${output.commits} 次提交`
-  if (step.step_key === 'discover_repositories' && output.discovered_repositories != null) return `${output.discovered_repositories} 个仓库`
+  if (step.step_key === 'discover_repositories' && output.selected_repositories != null) return `${output.selected_repositories.length} 个仓库${output.operation === 'reuse_snapshot' ? '（复用快照）' : ''}`
   if (step.step_key === 'send_email' && output.recipient_count != null) return `${output.recipient_count} 位收件人`
   return ''
 }

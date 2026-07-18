@@ -49,6 +49,7 @@ def _serialize_repository_reports(reports, *, include_empty: bool = False, activ
                         "author_name": commit.author_name,
                         "author_email": commit.author_email,
                         "authored_at": commit.authored_at.isoformat(),
+                        "committed_at": commit.committed_at.isoformat() if commit.committed_at else None,
                         "subject": commit.subject,
                         "files_changed": commit.files_changed,
                         "additions": commit.additions,
@@ -92,6 +93,10 @@ def _deserialize_repository_reports(value: str) -> tuple[list, bool, str | None]
                 files_changed=int(commit.get("files_changed") or 0),
                 additions=int(commit.get("additions") or 0),
                 deletions=int(commit.get("deletions") or 0),
+                committed_at=(
+                    datetime.fromisoformat(str(commit["committed_at"]).replace("Z", "+00:00"))
+                    if commit.get("committed_at") else None
+                ),
             )
             for commit in item.get("commits", [])
         ]
@@ -218,7 +223,7 @@ def list_active_repositories(
                     "additions": sum(c.additions for c in report.commits),
                     "deletions": sum(c.deletions for c in report.commits),
                     "last_commit_at": (
-                        max((c.authored_at for c in report.commits), default=None).isoformat()
+                        max((c.activity_at for c in report.commits), default=None).isoformat()
                         if report.commits else None
                     ),
                 }
@@ -313,6 +318,7 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
 
     record = ReportHistory(
         org_name="",
+        selection_snapshot_id=body.snapshot_id,
         report_type=body.report_type,
         period_start=start.isoformat(),
         period_end=end.isoformat(),
@@ -377,6 +383,7 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
                 snapshot_repositories=snapshot_repositories,
                 snapshot_include_empty=snapshot_include_empty,
                 snapshot_activity_window=body.activity_window,
+                snapshot_id=body.snapshot_id,
             )
 
             # Set total repository count
@@ -414,6 +421,7 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
                         "status": rec.status,
                         "total_commits": rec.total_commits,
                         "email_sent": bool(rec.email_sent_at),
+                        "selection_snapshot_id": rec.selection_snapshot_id,
                     },
                 )
         except Exception as e:

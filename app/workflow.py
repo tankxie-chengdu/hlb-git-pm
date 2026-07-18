@@ -5,8 +5,8 @@ from typing import Any, Protocol
 
 STEP_PLAN: tuple[tuple[str, str], ...] = (
     ("period", "确定统计周期"),
-    ("discover_repositories", "发现仓库"),
-    ("scan_repositories", "同步并采集提交"),
+    ("discover_repositories", "确定仓库范围"),
+    ("scan_repositories", "同步或复用提交"),
     ("aggregate_metrics", "计算宏观指标"),
     ("ai_analysis", "AI 分析"),
     ("render_report", "渲染报告"),
@@ -27,4 +27,3 @@ class WorkflowReporter(Protocol):
     def skip(self, step_key: str, output_summary: dict[str, Any] | None = None) -> None: ...
 
     def fail(self, step_key: str, error: str) -> None: ...
-

@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .ai import analyze
+from .ai import analyze, build_context, context_commit_count
 from .config import AppConfig, load_config
 from .emailer import send_email
 from .github_app import discover_repositories
@@ -15,6 +15,8 @@ from .git_service import scan_repository
 from .models import DailyReport, MemberInfo, PeriodReport, RepositoryReport
 from .report import render_html, render_markdown, render_period_html, render_period_markdown
 from .workflow import WorkflowReporter
+
+REPORT_TOP_LEVEL_SECTION_COUNT = 8
 
 logger = logging.getLogger("git_daily_report")
 
@@ -35,6 +37,7 @@ def run_once(
     snapshot_repositories: list[RepositoryReport] | None = None,
     snapshot_include_empty: bool = False,
     snapshot_activity_window: str | None = None,
+    snapshot_id: int | None = None,
 ) -> DailyReport | PeriodReport:
     timezone = ZoneInfo(config.timezone)
     workspace = Path(config.workspace).expanduser().resolve()
@@ -49,6 +52,9 @@ def run_once(
                 "start_date": target_date.isoformat(),
                 "end_date": _end.isoformat(),
                 "timezone": config.timezone,
+                "source": "active_snapshot" if snapshot_repositories is not None else "live_scan",
+                "snapshot_id": snapshot_id,
+                "activity_window": snapshot_activity_window,
             },
         )
         workflow.success(
@@ -80,10 +86,12 @@ def run_once(
                     "activity_window": snapshot_activity_window,
                 },
             )
-            workflow.success(
+            workflow.skip(
                 "discover_repositories",
                 {
+                    "operation": "reuse_snapshot",
                     "source": "active_snapshot",
+                    "snapshot_id": snapshot_id,
                     "selected_repositories": [repo.name for repo in repositories],
                     "activity_window": snapshot_activity_window,
                 },
@@ -98,7 +106,11 @@ def run_once(
                 "commits_found": sum(len(repo.commits) for repo in repositories),
                 "files_changed": sum(commit.files_changed for repo in repositories for commit in repo.commits),
             }
-            (workflow.warning if scan_failed else workflow.success)("scan_repositories", scan_output)
+            scan_output.update({"operation": "reuse_snapshot", "snapshot_id": snapshot_id})
+            if scan_failed:
+                workflow.warning("scan_repositories", scan_output)
+            else:
+                workflow.skip("scan_repositories", scan_output)
     else:
         repository_configs = list(config.repositories)
         if workflow:
@@ -232,6 +244,9 @@ def run_once(
                 "model": config.ai.model,
                 "thinking_enabled": config.ai.thinking_enabled,
                 "max_commits": config.ai.max_commits,
+                "report_commits": report.total_commits,
+                "context_commits": context_commit_count(report, config.ai.max_commits),
+                "omitted_commits": max(0, report.total_commits - context_commit_count(report, config.ai.max_commits)),
             },
         )
     try:
@@ -247,14 +262,22 @@ def run_once(
         or "本地规则摘要" in report.ai_analysis
     )
     if workflow:
-        ai_output = {"characters": len(report.ai_analysis), "degraded": ai_degraded}
+        context_commits = context_commit_count(report, config.ai.max_commits)
+        ai_output = {
+            "characters": len(report.ai_analysis),
+            "degraded": ai_degraded,
+            "report_commits": report.total_commits,
+            "context_commits": context_commits,
+            "omitted_commits": max(0, report.total_commits - context_commits),
+            "context_characters": len(build_context(report, config.ai.max_commits)),
+        }
         if ai_degraded:
             workflow.warning("ai_analysis", ai_output)
         else:
             workflow.success("ai_analysis", ai_output)
 
     if workflow:
-        workflow.start("render_report", {"template": "unified-period-v2", "report_type": report_type})
+        workflow.start("render_report", {"template": "unified-period-v3", "report_type": report_type})
     try:
         if isinstance(report, DailyReport):
             markdown = render_markdown(report)
@@ -276,7 +299,8 @@ def run_once(
                     "markdown_characters": len(markdown),
                     "html_characters": len(html),
                     "output_path": str(output_path),
-                    "sections": 7,
+                    "sections": REPORT_TOP_LEVEL_SECTION_COUNT,
+                    "repository_sections": len(report.repositories),
                 },
             )
     except Exception as error:

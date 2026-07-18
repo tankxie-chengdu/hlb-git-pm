@@ -66,6 +66,7 @@ class ReportHistory(Base):
     error = Column(Text, nullable=True)
     email_sent_at = Column(String, nullable=True)
     created_at = Column(String, nullable=False)
+    selection_snapshot_id = Column(Integer, nullable=True, index=True)
 
 
 class ReportStep(Base):

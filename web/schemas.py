@@ -141,6 +141,7 @@ class ReportOut(BaseModel):
     error: str | None
     email_sent_at: str | None
     created_at: str
+    selection_snapshot_id: int | None = None
 
     class Config:
         from_attributes = True

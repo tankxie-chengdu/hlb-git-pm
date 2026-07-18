@@ -169,7 +169,7 @@ def scan_repository(
                 f"--since={start.isoformat()}",
                 f"--until={end.isoformat()}",
                 "--date=iso-strict",
-                "--format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%s",
+                "--format=%x1e%H%x1f%an%x1f%ae%x1f%aI%x1f%cI%x1f%s",
             ],
             repo_dir,
         )
@@ -178,10 +178,10 @@ def scan_repository(
             lines = [line for line in block.splitlines() if line.strip()]
             if not lines:
                 continue
-            fields = lines[0].split("\x1f", 4)
-            if len(fields) != 5:
+            fields = lines[0].split("\x1f", 5)
+            if len(fields) != 6:
                 continue
-            sha, author_name, author_email, authored_at, subject = fields
+            sha, author_name, author_email, authored_at, committed_at, subject = fields
             additions = deletions = files_changed = 0
             for stat_line in lines[1:]:
                 stat = stat_line.split("\t")
@@ -201,6 +201,7 @@ def scan_repository(
                     files_changed=files_changed,
                     additions=additions,
                     deletions=deletions,
+                    committed_at=_parse_date(committed_at).astimezone(timezone),
                 )
             )
         logger.info("仓库 %s 扫描完成：%d 次提交", config.name, len(commits))

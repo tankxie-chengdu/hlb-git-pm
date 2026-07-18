@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 from zoneinfo import ZoneInfo
 
 from app.config import AiConfig, AppConfig, EmailConfig, RepositoryConfig
-from app.models import RepositoryReport
+from app.models import Commit, RepositoryReport
 
 
 class SchedulerFailureTests(unittest.TestCase):
@@ -81,3 +81,45 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(("warning", "ai_analysis"), terminal)
         self.assertIn(("success", "render_report"), terminal)
         self.assertIn(("skip", "send_email"), terminal)
+
+    @patch("app.main.render_markdown", return_value="markdown")
+    @patch("app.main.render_html", return_value="<html></html>")
+    @patch("app.main.analyze", return_value="analysis")
+    @patch("app.main.scan_repository", side_effect=AssertionError("snapshot path must not scan"))
+    def test_run_once_reuses_snapshot_without_scanning(self, _scan, _analyze, _html, _markdown):
+        from datetime import date, datetime, timezone
+        from app.main import run_once
+
+        class Recorder:
+            def __init__(self):
+                self.events = []
+            def start(self, key, value=None): self.events.append(("start", key, value))
+            def progress(self, key, value): self.events.append(("progress", key, value))
+            def success(self, key, value=None): self.events.append(("success", key, value))
+            def warning(self, key, value=None): self.events.append(("warning", key, value))
+            def skip(self, key, value=None): self.events.append(("skip", key, value))
+            def fail(self, key, error): self.events.append(("fail", key, error))
+
+        config = AppConfig(
+            repositories=(),
+            email=EmailConfig(host="smtp.example.com", sender="a@b.com"),
+            ai=AiConfig(enabled=False),
+        )
+        commit = Commit("demo", "abc", "Alice", "alice@example.com", datetime(2026, 7, 7, tzinfo=timezone.utc), "change")
+        recorder = Recorder()
+        run_once(
+            config,
+            date(2026, 7, 6),
+            end_date=date(2026, 7, 12),
+            report_type="weekly",
+            dry_run=True,
+            output_dir="/tmp/hlb-git-pm-test-reports",
+            workflow=recorder,
+            snapshot_repositories=[RepositoryReport("demo", "all branches", [commit])],
+            snapshot_include_empty=True,
+            snapshot_id=12,
+            snapshot_activity_window="this_week",
+        )
+        skipped = {(event, key) for event, key, _ in recorder.events if event == "skip"}
+        self.assertIn(("skip", "discover_repositories"), skipped)
+        self.assertIn(("skip", "scan_repositories"), skipped)

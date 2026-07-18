@@ -54,6 +54,18 @@ def build_context(report: DailyReport | PeriodReport, max_commits: int) -> str:
     return "\n".join(lines)
 
 
+def context_commit_count(report: DailyReport | PeriodReport, max_commits: int) -> int:
+    """Return how many commit detail rows are actually sent to the AI."""
+    remaining = max(0, max_commits)
+    included = 0
+    for repo in report.repositories:
+        if remaining <= 0:
+            break
+        included += min(len(repo.commits), remaining)
+        remaining = max(0, remaining - len(repo.commits))
+    return included
+
+
 def fallback_analysis(report: DailyReport | PeriodReport) -> str:
     if not report.commits:
         return "本周期内没有捕获到提交。建议确认分支、时区和仓库同步状态。"

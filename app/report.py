@@ -68,7 +68,7 @@ def refresh_ai_section_html(html: str, value: str) -> str:
 def _render_commit_markdown(report: Report, commit) -> str:
     subject = commit.subject.replace("|", "\\|")
     return (
-        f"| {commit.authored_at.strftime('%m-%d')} | {commit.authored_at.strftime('%H:%M')} | "
+        f"| {commit.activity_at.strftime('%m-%d')} | {commit.activity_at.strftime('%H:%M')} | "
         f"{_resolve_name(report, commit)} | `{commit.sha[:8]}` | +{commit.additions}/-{commit.deletions} | "
         f"{subject} |"
     )
@@ -243,7 +243,7 @@ def _render_html(report: Report) -> str:
             body = '<p style="color:#667085">本周期无提交。</p>'
         else:
             rows = "".join(
-                f"<tr><td>{commit.authored_at.strftime('%m-%d')}</td><td>{commit.authored_at.strftime('%H:%M')}</td>"
+                f"<tr><td>{commit.activity_at.strftime('%m-%d')}</td><td>{commit.activity_at.strftime('%H:%M')}</td>"
                 f"<td>{escape(_resolve_name(report, commit))}</td><td><code>{commit.sha[:8]}</code></td>"
                 f"<td>+{commit.additions}/-{commit.deletions}</td><td>{escape(commit.subject)}</td></tr>"
                 for commit in repo.commits

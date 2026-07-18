@@ -22,6 +22,12 @@ class Commit:
     files_changed: int = 0
     additions: int = 0
     deletions: int = 0
+    committed_at: datetime | None = None
+
+    @property
+    def activity_at(self) -> datetime:
+        """Timestamp used for report period and trend calculations."""
+        return self.committed_at or self.authored_at
 
 
 @dataclass
@@ -84,7 +90,7 @@ class DailyReport:
     def daily_trend(self) -> list[dict[str, int | str]]:
         commits_by_day: dict[str, list[Commit]] = defaultdict(list)
         for commit in self.commits:
-            commits_by_day[commit.authored_at.date().isoformat()].append(commit)
+            commits_by_day[commit.activity_at.date().isoformat()].append(commit)
         return [
             {
                 "date": day,
@@ -110,7 +116,7 @@ class DailyReport:
                     "files_changed": sum(c.files_changed for c in commits),
                     "additions": sum(c.additions for c in commits),
                     "deletions": sum(c.deletions for c in commits),
-                    "last_commit_at": max((c.authored_at for c in commits), default=None),
+                    "last_commit_at": max((c.activity_at for c in commits), default=None),
                     "error": repo.error,
                 }
             )
@@ -172,7 +178,7 @@ class PeriodReport:
     def daily_trend(self) -> list[dict[str, int | str]]:
         commits_by_day: dict[str, list[Commit]] = defaultdict(list)
         for commit in self.commits:
-            commits_by_day[commit.authored_at.date().isoformat()].append(commit)
+            commits_by_day[commit.activity_at.date().isoformat()].append(commit)
         return [
             {
                 "date": day,
@@ -198,7 +204,7 @@ class PeriodReport:
                     "files_changed": sum(c.files_changed for c in commits),
                     "additions": sum(c.additions for c in commits),
                     "deletions": sum(c.deletions for c in commits),
-                    "last_commit_at": max((c.authored_at for c in commits), default=None),
+                    "last_commit_at": max((c.activity_at for c in commits), default=None),
                     "error": repo.error,
                 }
             )
