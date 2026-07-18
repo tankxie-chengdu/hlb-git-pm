@@ -82,6 +82,7 @@ def _render_markdown(report: Report) -> str:
         f"无提交 {report.empty_repositories} 个，失败 {report.failed_repositories} 个。"
     )
     synced_count = report.scanned_repositories - report.failed_repositories
+    total_repos = report.total_repositories_count or report.scanned_repositories
     lines = [
         f"# Git {type_label} | {start}" + (f" ~ {end}" if end != start else ""),
         "",
@@ -89,7 +90,7 @@ def _render_markdown(report: Report) -> str:
         "",
         "| 指标 | 数值 |",
         "| --- | ---: |",
-        f"| 仓库总数 | {report.scanned_repositories} |",
+        f"| 仓库总数 | {total_repos} |",
         f"| 同步成功 | {synced_count} |",
         f"| 活跃仓库 | {report.active_repositories} |",
         f"| 无提交仓库 | {report.empty_repositories} |",
@@ -206,7 +207,8 @@ def _render_html(report: Report) -> str:
     start, end = _period(report)
     type_label = _label(report)
     synced_count = report.scanned_repositories - report.failed_repositories
-    overview_rows = f"""<tr><td>仓库总数</td><td><strong>{report.scanned_repositories}</strong></td></tr>
+    total_repos = report.total_repositories_count or report.scanned_repositories
+    overview_rows = f"""<tr><td>仓库总数</td><td><strong>{total_repos}</strong></td></tr>
 <tr><td>同步成功</td><td><strong style="color:#0d9488">{synced_count}</strong></td></tr>
 <tr><td>活跃仓库</td><td><strong style="color:#059669">{report.active_repositories}</strong></td></tr>
 <tr><td>无提交仓库</td><td>{report.empty_repositories}</td></tr>

@@ -341,6 +341,9 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
 
             run_config = config
 
+            # Get total repository count from database
+            total_repos_count = session.query(Repository).filter(Repository.is_deleted == False).count()
+
             # Build member mapping from DB
             members = session.query(Member).all()
             mapping: dict[str, MemberInfo] = {}
@@ -375,6 +378,9 @@ def trigger_report(body: ReportTrigger, db: Session = Depends(get_db), _user: Us
                 snapshot_include_empty=snapshot_include_empty,
                 snapshot_activity_window=body.activity_window,
             )
+
+            # Set total repository count
+            result.total_repositories_count = total_repos_count
 
             rec = session.query(ReportHistory).filter(ReportHistory.id == report_id).first()
             if rec:

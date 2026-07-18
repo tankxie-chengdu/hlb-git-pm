@@ -38,6 +38,7 @@ class DailyReport:
     generated_at: datetime
     repositories: list[RepositoryReport]
     ai_analysis: str = ""
+    total_repositories_count: int = 0  # Total repos in database (for context)
 
     @property
     def commits(self) -> list[Commit]:
@@ -125,6 +126,7 @@ class PeriodReport:
     repositories: list[RepositoryReport]
     ai_analysis: str = ""
     member_mapping: dict[str, MemberInfo] = field(default_factory=dict)
+    total_repositories_count: int = 0  # Total repos in database (for context)
 
     @property
     def commits(self) -> list[Commit]:
