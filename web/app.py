@@ -41,7 +41,7 @@ def create_app(config=None, config_path: str = "config.toml") -> FastAPI:
     # Store config on app state
     app.state.config = config
 
-    # Mount API routers
+    # Mount API routers — these must be mounted first so they have priority
     app.include_router(auth.router, prefix="/api")
     app.include_router(dashboard.router, prefix="/api")
     app.include_router(members.router, prefix="/api")
@@ -59,11 +59,14 @@ def create_app(config=None, config_path: str = "config.toml") -> FastAPI:
         if assets_dir.is_dir():
             app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
-        # Catch-all: return index.html for any non-API path (SPA client-side routing)
+        # SPA fallback for all remaining non-API routes
+        # Serve index.html to let Vue Router handle client-side routing
         index_file = dist_dir / "index.html"
 
-        @app.get("/{full_path:path}", include_in_schema=False)
-        async def spa_fallback(full_path: str):
+        # Create a custom route handler that only triggers for specific non-API paths
+        @app.get("/{full_path:path}", name="spa", include_in_schema=False)
+        async def spa_index(full_path: str):
+            # Allow everything that's not an API route (API routes have already been matched above)
             return FileResponse(str(index_file))
 
         logger.info("前端静态文件挂载: %s", dist_dir)
