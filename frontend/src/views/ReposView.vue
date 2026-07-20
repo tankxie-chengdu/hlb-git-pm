@@ -349,13 +349,22 @@ async function copyGitCommand(repo) {
 
     let command = 'git'
 
-    // Add proxy options if enabled
+    // Add proxy options based on URL protocol (only if enabled)
     if (proxy.enabled) {
-      if (proxy.http_proxy) {
-        command += ` -c http.proxy=${proxy.http_proxy}`
-      }
-      if (proxy.https_proxy) {
+      // Determine protocol from clone URL
+      const isHttps = repo.clone_url?.startsWith('https://')
+      const isHttp = repo.clone_url?.startsWith('http://')
+
+      if (isHttps && proxy.https_proxy) {
+        // For HTTPS URLs, only set https.proxy
         command += ` -c https.proxy=${proxy.https_proxy}`
+      } else if (isHttp && proxy.http_proxy) {
+        // For HTTP URLs, only set http.proxy
+        command += ` -c http.proxy=${proxy.http_proxy}`
+      } else if (!isHttps && !isHttp && proxy.https_proxy) {
+        // For SSH URLs, set both (git may use HTTP internally)
+        if (proxy.http_proxy) command += ` -c http.proxy=${proxy.http_proxy}`
+        if (proxy.https_proxy) command += ` -c https.proxy=${proxy.https_proxy}`
       }
     }
 
