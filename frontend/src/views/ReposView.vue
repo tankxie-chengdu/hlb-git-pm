@@ -108,6 +108,17 @@
               {{ isSyncing(repo.full_name) ? '同步中' : repo.is_cloned ? '重新同步' : '同步' }}
             </el-button>
 
+            <!-- 复制命令按钮 -->
+            <el-tooltip content="复制 git 克隆命令到剪贴板" placement="top">
+              <el-button
+                link
+                size="small"
+                icon="DocumentCopy"
+                @click.stop="copyGitCommand(repo)"
+                style="padding: 0"
+              />
+            </el-tooltip>
+
             <!-- 展开按钮 -->
             <el-button
               v-if="repo.is_cloned && repo.contributors.length"
@@ -158,7 +169,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { Loading, CircleCheck, CircleClose, Clock } from '@element-plus/icons-vue'
+import { Loading, CircleCheck, CircleClose, Clock, DocumentCopy } from '@element-plus/icons-vue'
 import client from '../api/client'
 import { ElMessage } from 'element-plus'
 
@@ -328,6 +339,40 @@ async function syncOne(repo) {
     startPoll()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '同步失败')
+  }
+}
+
+async function copyGitCommand(repo) {
+  try {
+    // Fetch proxy config to include in the command
+    const proxyResp = await client.get('/settings/proxy')
+    const proxy = proxyResp.data
+
+    let command = 'git'
+
+    // Add proxy options if enabled
+    if (proxy.enabled) {
+      if (proxy.http_proxy) {
+        command += ` -c http.proxy=${proxy.http_proxy}`
+      }
+      if (proxy.https_proxy) {
+        command += ` -c https.proxy=${proxy.https_proxy}`
+      }
+    }
+
+    // Add clone or fetch command based on sync status
+    const isClone = !repo.is_cloned
+    if (isClone) {
+      command += ` clone --mirror ${repo.clone_url} ./.data/repos/${repo.full_name}`
+    } else {
+      command += ` -C ./.data/repos/${repo.full_name} fetch --all --prune`
+    }
+
+    // Copy to clipboard
+    await navigator.clipboard.writeText(command)
+    ElMessage.success(`已复制${isClone ? '克隆' : '更新'}命令到剪贴板`)
+  } catch (e) {
+    ElMessage.error('复制失败: ' + (e.message || '未知错误'))
   }
 }
 
