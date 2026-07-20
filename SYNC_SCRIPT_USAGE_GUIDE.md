@@ -2,10 +2,26 @@
 
 ## 🎯 快速开始
 
+### 获取认证 Token
+
+首先需要获得一个有效的 JWT token（从你的系统中获取）：
+
+```bash
+# 方式 1: 从环境变量设置
+export SYNC_TOKEN='your_jwt_token_here'
+
+# 方式 2: 直接命令行传递
+python sync_all.py --token 'your_jwt_token_here'
+```
+
 ### 最简单的使用
 
 ```bash
-# 全量同步所有仓库
+# 全量同步所有仓库（需要 token）
+python sync_all.py --token YOUR_TOKEN
+
+# 或使用环境变量
+export SYNC_TOKEN='YOUR_TOKEN'
 python sync_all.py
 ```
 
@@ -13,16 +29,16 @@ python sync_all.py
 
 ```bash
 # 同步指定仓库
-python sync_all.py --repos WeFi-HLB/ai-ocr WeFi-HLB/fps-tp
+python sync_all.py --token $SYNC_TOKEN --repos WeFi-HLB/ai-ocr WeFi-HLB/fps-tp
 
 # 设置 2 小时超时
-python sync_all.py --timeout 7200
+python sync_all.py --token $SYNC_TOKEN --timeout 7200
 
 # 连接到远程服务器
-python sync_all.py --api http://192.168.1.100:8000
+python sync_all.py --token $SYNC_TOKEN --api http://192.168.1.100:8000
 
 # 触发后不等待（返回立即）
-python sync_all.py --no-wait
+python sync_all.py --token $SYNC_TOKEN --no-wait
 ```
 
 ---
@@ -57,6 +73,7 @@ POST /api/repos/sync (触发后台同步)
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--api` | http://localhost:8000 | API 服务器地址 |
+| `--token` | 无 | JWT 认证 token (可从环境变量 SYNC_TOKEN 读取) |
 | `--repos` | 无 | 指定要同步的仓库 (空表示全量) |
 | `--timeout` | 3600 (1小时) | 超时时间（秒） |
 | `--poll-interval` | 2 | 轮询间隔（秒） |
