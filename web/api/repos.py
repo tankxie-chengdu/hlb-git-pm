@@ -650,11 +650,12 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
             )
             # Pass proxy_config explicitly (it's captured from outer scope but be explicit for clarity)
             logger.info("同步开始: %s, 代理配置: %s", full_name, proxy_config)
-            ensure_repository(cfg, workspace, proxy_config=proxy_config)
-            local_dir = _repo_local_dir(r["clone_url"], workspace)
+            local_dir = ensure_repository(cfg, workspace, proxy_config=proxy_config)
             if local_dir:
                 _persist_contributors(full_name, local_dir)
                 _update_repo_after_sync(full_name, local_dir)
+            else:
+                logger.warning("ensure_repository 返回空路径: %s", full_name)
 
             # Update DB: mark as done
             with _sync_lock:
