@@ -13,9 +13,12 @@
         </el-table-column>
         <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
         <el-table-column prop="total_commits" label="提交数" width="90" />
-        <el-table-column label="状态" width="100">
+        <el-table-column label="状态" min-width="240">
           <template #default="{ row }">
             <el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+            <div v-if="row.status === 'sent' && row.email_recipients?.length" class="sent-recipients">
+              发送至：{{ row.email_recipients.join('、') }}
+            </div>
           </template>
         </el-table-column>
         <el-table-column prop="created_at" label="创建时间" width="180" />
@@ -44,8 +47,8 @@ const loading = ref(true)
 const page = ref(1)
 const pageSize = 20
 
-function typeLabel(t) { return { daily: '日报', weekly: '周报', monthly: '月报' }[t] || t }
-function typeTag(t) { return { daily: '', weekly: 'success', monthly: 'warning' }[t] || 'info' }
+function typeLabel(t) { return { daily: '日报', weekly: '周报', monthly: '月报', yearly: '年报' }[t] || t }
+function typeTag(t) { return { daily: '', weekly: 'success', monthly: 'warning', yearly: 'danger' }[t] || 'info' }
 function statusLabel(s) { return { running: '运行中', completed: '已完成', sent: '已发送', failed: '失败' }[s] || s }
 function statusTag(s) { return { running: 'warning', completed: 'success', sent: 'success', failed: 'danger' }[s] || 'info' }
 
@@ -58,3 +61,7 @@ async function fetchData() {
 
 onMounted(fetchData)
 </script>
+
+<style scoped>
+.sent-recipients { margin-top: 5px; color: #606266; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+</style>

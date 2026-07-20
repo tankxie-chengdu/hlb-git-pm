@@ -13,12 +13,46 @@
         <div class="step-content">
           <div class="step-title">选择报告类型</div>
           <el-segmented v-model="form.report_type" :options="reportTypeOptions" @change="handleTypeChange" />
+          <div class="period-controls">
+            <el-date-picker
+              v-if="form.report_type === 'daily'"
+              v-model="form.selected_date"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="选择日报日期"
+              :disabled-date="disableFutureDate"
+              @change="handlePeriodChange"
+            />
+            <template v-else-if="form.report_type === 'weekly'">
+              <el-date-picker
+                v-model="form.selected_month"
+                type="month"
+                value-format="YYYY-MM"
+                placeholder="选择月份"
+                :disabled-date="disableFutureMonth"
+                @change="handleWeekMonthChange"
+              />
+              <el-select v-model="form.week_index" placeholder="选择该月周次" @change="handlePeriodChange">
+                <el-option v-for="week in weekOptions" :key="week.value" :label="week.label" :value="week.value" />
+              </el-select>
+            </template>
+            <el-date-picker
+              v-else-if="form.report_type === 'monthly'"
+              v-model="form.selected_month"
+              type="month"
+              value-format="YYYY-MM"
+              placeholder="选择月份"
+              :disabled-date="disableFutureMonth"
+              @change="handlePeriodChange"
+            />
+            <div v-else class="year-period">2026 年 1 月 1 日至今天</div>
+          </div>
           <div class="period-band">
             <span class="period-label">统计周期</span>
             <strong v-if="period.start">{{ period.start }}<template v-if="period.end !== period.start"> 至 {{ period.end }}</template></strong>
             <span v-else>选择类型后自动计算</span>
             <span class="period-rule">{{ periodRule }}</span>
-            <span class="activity-label">活跃标签：{{ activityLabel }}</span>
+            <span class="activity-label">项目范围：所选周期内有提交的项目</span>
           </div>
         </div>
       </div>
@@ -31,7 +65,7 @@
           <div class="step-title-row">
             <div>
               <div class="step-title">选择项目（可选）</div>
-              <div class="step-hint">留空表示生成该标签下的全部项目。</div>
+              <div class="step-hint">留空表示生成所选周期内的全部活跃项目。</div>
             </div>
             <el-button :icon="Refresh" :loading="activeLoading" @click="loadActiveRepositories">重新筛选</el-button>
           </div>
@@ -55,7 +89,7 @@
               v-model="form.repo_name"
               filterable
               clearable
-              placeholder="该标签下的全部项目"
+              placeholder="所选周期内的全部活跃项目"
               class="repo-select"
               :disabled="!activeRepositories.length"
             >
@@ -67,7 +101,7 @@
               </el-option>
             </el-select>
 
-            <el-empty v-if="period.start && !activeRepositories.length" description="该活跃标签下没有可用项目" :image-size="72" />
+            <el-empty v-if="period.start && !activeRepositories.length" description="所选周期内没有活跃项目，仍可生成人员零活动报告" :image-size="72" />
           </template>
         </div>
       </div>
@@ -90,14 +124,14 @@
 
       <div class="action-bar">
         <div class="action-summary">
-          {{ typeLabel(form.report_type) }} · {{ activityLabel }} ·
+          {{ typeLabel(form.report_type) }} · {{ period.start }} 至 {{ period.end }} ·
           {{ form.repo_name ? `仅生成 ${form.repo_name}` : `全部 ${activeRepositories.length} 个项目` }}
         </div>
         <el-button
           type="primary"
           size="large"
           :loading="triggering"
-          :disabled="activeLoading || !activeRepositories.length"
+          :disabled="activeLoading || !snapshotId"
           @click="handleTrigger"
         >
           生成{{ typeLabel(form.report_type) }}
@@ -121,8 +155,20 @@ const reportTypeOptions = [
   { label: '日报', value: 'daily' },
   { label: '周报', value: 'weekly' },
   { label: '月报', value: 'monthly' },
+  { label: '年报', value: 'yearly' },
 ]
-const form = reactive({ report_type: 'daily', repo_name: '', dry_run: true })
+const today = new Date()
+const yesterday = new Date(today)
+yesterday.setDate(yesterday.getDate() - 1)
+const previousMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1)
+const form = reactive({
+  report_type: 'daily',
+  repo_name: '',
+  selected_date: formatDate(yesterday),
+  selected_month: formatMonth(previousMonth),
+  week_index: 1,
+  dry_run: true,
+})
 const period = reactive({ start: '', end: '' })
 const activeRepositories = ref([])
 const activeLoading = ref(false)
@@ -132,25 +178,67 @@ const triggering = ref(false)
 const result = ref(null)
 
 const periodRule = computed(() => ({
-  daily: '昨天',
-  weekly: '上一个自然周（周一至周日）',
-  monthly: '上一个自然月',
+  daily: '指定日期',
+  weekly: '自然月内按周一至周日切分，首尾周按月边界截断',
+  monthly: '指定自然月',
+  yearly: '2026 年以来',
 }[form.report_type]))
-const activityWindow = computed(() => ({
-  daily: 'today',
-  weekly: 'this_week',
-  monthly: 'this_month',
-}[form.report_type]))
-const activityLabel = computed(() => ({
-  today: '今天活跃',
-  this_week: '本周活跃',
-  this_month: '本月活跃',
-}[activityWindow.value]))
+const weekOptions = computed(() => buildMonthWeeks(form.selected_month))
+const selectedPeriod = computed(() => {
+  if (form.report_type === 'daily') return { start: form.selected_date, end: form.selected_date }
+  if (form.report_type === 'weekly') return weekOptions.value.find(week => week.value === form.week_index) || { start: '', end: '' }
+  if (form.report_type === 'monthly') return monthPeriod(form.selected_month)
+  return { start: '2026-01-01', end: formatDate(today) }
+})
 const resultMessage = computed(() => result.value ? `报告 #${result.value.id} 已开始生成` : '')
 
-function typeLabel(type) { return { daily: '日报', weekly: '周报', monthly: '月报' }[type] || type }
+function typeLabel(type) { return { daily: '日报', weekly: '周报', monthly: '月报', yearly: '年报' }[type] || type }
+
+function formatDate(date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+function formatMonth(date) { return formatDate(date).slice(0, 7) }
+function parseMonth(value) {
+  if (!value) return null
+  const [year, month] = value.split('-').map(Number)
+  return new Date(year, month - 1, 1)
+}
+function monthPeriod(value) {
+  const startDate = parseMonth(value)
+  if (!startDate) return { start: '', end: '' }
+  const monthEnd = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0)
+  const endDate = monthEnd > today ? today : monthEnd
+  return { start: formatDate(startDate), end: formatDate(endDate) }
+}
+function buildMonthWeeks(value) {
+  const month = monthPeriod(value)
+  if (!month.start) return []
+  const monthEnd = new Date(`${month.end}T00:00:00`)
+  let cursor = new Date(`${month.start}T00:00:00`)
+  const weeks = []
+  let index = 1
+  while (cursor <= monthEnd) {
+    const weekday = (cursor.getDay() + 6) % 7
+    const end = new Date(cursor)
+    end.setDate(end.getDate() + (6 - weekday))
+    if (end > monthEnd) end.setTime(monthEnd.getTime())
+    weeks.push({ value: index, start: formatDate(cursor), end: formatDate(end), label: `第 ${index} 周（${formatDate(cursor).slice(5)} 至 ${formatDate(end).slice(5)}）` })
+    cursor = new Date(end)
+    cursor.setDate(cursor.getDate() + 1)
+    index += 1
+  }
+  return weeks
+}
+function disableFutureDate(value) { return value > today }
+function disableFutureMonth(value) { return value.getFullYear() > today.getFullYear() || (value.getFullYear() === today.getFullYear() && value.getMonth() > today.getMonth()) }
 
 async function loadActiveRepositories() {
+  if (!selectedPeriod.value.start || !selectedPeriod.value.end) return
+  period.start = selectedPeriod.value.start
+  period.end = selectedPeriod.value.end
   activeLoading.value = true
   result.value = null
   form.repo_name = ''
@@ -158,8 +246,10 @@ async function loadActiveRepositories() {
   try {
     const { data } = await client.post('/reports/active-repositories', {
       report_type: form.report_type,
+      period_start: selectedPeriod.value.start,
+      period_end: selectedPeriod.value.end,
       skip_fetch: true,
-      activity_window: activityWindow.value,
+      activity_window: null,
     }, { timeout: 10 * 60 * 1000 })
     period.start = data.period_start
     period.end = data.period_end
@@ -178,19 +268,36 @@ async function loadActiveRepositories() {
 }
 
 function handleTypeChange() {
+  if (form.report_type === 'weekly') {
+    form.selected_month = formatMonth(today)
+    const options = buildMonthWeeks(form.selected_month)
+    form.week_index = options.length ? options[options.length - 1].value : 1
+  } else if (form.report_type === 'monthly' && !form.selected_month) {
+    form.selected_month = formatMonth(previousMonth)
+  }
   loadActiveRepositories()
 }
+
+function handleWeekMonthChange() {
+  const options = buildMonthWeeks(form.selected_month)
+  form.week_index = options.length ? options[0].value : 1
+  handlePeriodChange()
+}
+
+function handlePeriodChange() { loadActiveRepositories() }
 
 async function handleTrigger() {
   triggering.value = true
   try {
     const { data } = await client.post('/reports/trigger', {
       report_type: form.report_type,
+      period_start: selectedPeriod.value.start,
+      period_end: selectedPeriod.value.end,
       repo_names: form.repo_name ? [form.repo_name] : [],
       // Active-project filtering already fetched the latest refs.
       skip_fetch: true,
       snapshot_id: snapshotId.value,
-      activity_window: activityWindow.value,
+      activity_window: null,
       dry_run: form.dry_run,
     })
     result.value = data
@@ -221,6 +328,9 @@ onMounted(loadActiveRepositories)
 .step-hint { color: #909399; font-size: 13px; }
 .step-divider { height: 1px; background: #ebeef5; margin-left: 76px; }
 .period-band { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; padding: 13px 16px; background: #f5f7fa; border-left: 3px solid #0d9488; }
+.period-controls { display: flex; gap: 12px; margin-top: 16px; }
+.period-controls > * { min-width: 220px; }
+.year-period { min-height: 32px; display: flex; align-items: center; color: #303133; font-weight: 600; }
 .period-label { color: #606266; }
 .period-rule { margin-left: auto; color: #909399; font-size: 12px; }
 .filtering-state { min-height: 126px; display: flex; align-items: center; justify-content: center; gap: 14px; background: #f8fafc; border: 1px dashed #c0c4cc; }

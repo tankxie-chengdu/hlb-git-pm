@@ -259,8 +259,8 @@ function rankClass(idx) {
 }
 
 // --- 标签辅助 ---
-function typeLabel(t) { return { daily: '日报', weekly: '周报', monthly: '月报' }[t] || t }
-function typeTag(t) { return { daily: '', weekly: 'success', monthly: 'warning' }[t] || 'info' }
+function typeLabel(t) { return { daily: '日报', weekly: '周报', monthly: '月报', yearly: '年报' }[t] || t }
+function typeTag(t) { return { daily: '', weekly: 'success', monthly: 'warning', yearly: 'danger' }[t] || 'info' }
 function statusLabel(s) { return { running: '运行中', completed: '已完成', sent: '已发送', failed: '失败' }[s] || s }
 function statusTag(s) { return { running: 'warning', completed: 'success', sent: 'success', failed: 'danger' }[s] || 'info' }
 function statusDotClass(s) { return { running: 'dot-warning', completed: 'dot-success', sent: 'dot-success', failed: 'dot-danger' }[s] || '' }

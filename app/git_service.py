@@ -79,6 +79,15 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True, env: dict[str, s
     elif proxy_config:
         logger.debug("代理配置已禁用")
 
+    # Add performance and stability configurations for large repositories
+    # These help with network issues and large file transfers
+    cmd.extend([
+        "-c", "core.compression=0",           # Disable compression for speed
+        "-c", "http.postBuffer=524288000",    # 500MB buffer for large pushes
+        "-c", "http.lowSpeedLimit=0",         # No speed limit during large transfers
+        "-c", "http.lowSpeedTime=999999",     # High timeout for large transfers
+    ])
+
     cmd.extend(args)
 
     process = subprocess.run(

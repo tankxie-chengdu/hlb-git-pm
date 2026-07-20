@@ -44,11 +44,30 @@ def init_db(db_path: str = ".data/hlb-git-pm.db") -> None:
 def _ensure_compat_columns() -> None:
     """Add lightweight columns for installations initialized via create_all."""
     inspector = inspect(_engine)
-    columns = {column["name"] for column in inspector.get_columns("report_history")}
-    if "selection_snapshot_id" not in columns:
+    report_columns = {column["name"] for column in inspector.get_columns("report_history")}
+    if "selection_snapshot_id" not in report_columns:
         with _engine.begin() as connection:
             connection.execute(text("ALTER TABLE report_history ADD COLUMN selection_snapshot_id INTEGER"))
         logger.info("已补充 report_history.selection_snapshot_id 列")
+    if "project_analysis_json" not in report_columns:
+        with _engine.begin() as connection:
+            connection.execute(text("ALTER TABLE report_history ADD COLUMN project_analysis_json TEXT NOT NULL DEFAULT '[]'"))
+        logger.info("已补充 report_history.project_analysis_json 列")
+    if "trend_chart_png" not in report_columns:
+        with _engine.begin() as connection:
+            connection.execute(text("ALTER TABLE report_history ADD COLUMN trend_chart_png BLOB"))
+        logger.info("已补充 report_history.trend_chart_png 列")
+    if "email_recipients_json" not in report_columns:
+        with _engine.begin() as connection:
+            connection.execute(text("ALTER TABLE report_history ADD COLUMN email_recipients_json TEXT NOT NULL DEFAULT '[]'"))
+        logger.info("已补充 report_history.email_recipients_json 列")
+
+    member_columns = {column["name"] for column in inspector.get_columns("members")}
+    if "is_outsourced" not in member_columns:
+        with _engine.begin() as connection:
+            connection.execute(text("ALTER TABLE members ADD COLUMN is_outsourced BOOLEAN NOT NULL DEFAULT 0"))
+            connection.execute(text("UPDATE members SET is_outsourced = 1 WHERE substr(lower(trim(real_name)), 1, 2) = 'v_'"))
+        logger.info("已补充 members.is_outsourced 列，并按 v_ 姓名完成初始标记")
 
 
 def get_engine():

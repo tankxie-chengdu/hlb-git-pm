@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date
 from html import escape
 
 from .models import DailyReport, PeriodReport, RepositoryReport
 
 
 Report = DailyReport | PeriodReport
-_TYPE_LABELS = {"daily": "日报", "weekly": "周报", "monthly": "月报"}
+_TYPE_LABELS = {"daily": "日报", "weekly": "周报", "monthly": "月报", "yearly": "年报"}
 
 
 def _report_type(report: Report) -> str:
@@ -26,22 +26,56 @@ def _label(report: Report) -> str:
 
 
 def _resolve_name(report: Report, commit) -> str:
-    if isinstance(report, PeriodReport):
-        return report._resolve_name(commit)
-    return commit.author_name
+    return report._resolve_name(commit)
 
 
-def _status_label(status: str) -> str:
-    return {"active": "活跃", "empty": "无提交", "failed": "扫描失败"}.get(status, status)
+def _render_person_html(value: object, is_outsourced: bool | None = None) -> str:
+    name = str(value)
+    rendered = escape(name)
+    highlighted = is_outsourced if is_outsourced is not None else name.strip().casefold().startswith("v_")
+    if highlighted:
+        return f'<span style="color:#2563eb;font-weight:600">{rendered}</span>'
+    return rendered
 
 
-def _last_commit_text(value: datetime | None) -> str:
-    return value.strftime("%m-%d %H:%M") if value else "-"
+def _commit_detail_limit(report: Report) -> int:
+    return {"daily": 200, "weekly": 100, "monthly": 50, "yearly": 20}.get(_report_type(report), 50)
 
 
-def _render_ai_html(value: str) -> str:
+def _project_analysis(report: Report, repository: str) -> dict[str, object]:
+    for item in report.project_analyses:
+        if str(item.get("repository")) == repository:
+            return item
+    return {
+        "work_summary": "暂无结构化工作摘要。",
+        "quality_signal": "当前证据不足，无法判断工程质量信号。",
+        "quality_level": "证据不足",
+        "evidence": [],
+        "confidence": "低",
+    }
+
+
+def _display_repository(report: Report, value: object) -> str:
+    return report.display_repository_name(str(value))
+
+
+def _display_text(report: Report, value: str) -> str:
+    prefix = f"{report.organization}/" if report.organization else ""
+    return value.replace(prefix, "") if prefix else value
+
+
+def _report_title(report: Report) -> str:
+    from .periods import format_report_title
+
+    start, end = _period(report)
+    return format_report_title(_report_type(report), date.fromisoformat(start), date.fromisoformat(end), report.organization)
+
+
+def _render_ai_html(value: str, organization: str = "") -> str:
     """Convert the AI's Markdown response into safe email HTML."""
     text = value or "暂无 AI 分析。"
+    if organization:
+        text = text.replace(f"{organization}/", "")
     try:
         import markdown
 
@@ -56,13 +90,13 @@ def _render_ai_html(value: str) -> str:
         return escape(text).replace("\n", "<br>")
 
 
-def refresh_ai_section_html(html: str, value: str) -> str:
+def refresh_ai_section_html(html: str, value: str, organization: str = "") -> str:
     """Repair the AI section of HTML saved by older report versions."""
     pattern = re.compile(
         r"(<section[^>]*>\s*<h2[^>]*>1\. 执行摘要</h2>).*?(</section>)",
         re.DOTALL,
     )
-    return pattern.sub(lambda match: f"{match.group(1)}{_render_ai_html(value)}{match.group(2)}", html, count=1)
+    return pattern.sub(lambda match: f"{match.group(1)}{_render_ai_html(value, organization)}{match.group(2)}", html, count=1)
 
 
 def _render_commit_markdown(report: Report, commit) -> str:
@@ -84,7 +118,7 @@ def _render_markdown(report: Report) -> str:
     synced_count = report.scanned_repositories - report.failed_repositories
     total_repos = report.total_repositories_count or report.scanned_repositories
     lines = [
-        f"# Git {type_label} | {start}" + (f" ~ {end}" if end != start else ""),
+        f"# {_report_title(report)}",
         "",
         "## 0. WeFi-HLB 概览",
         "",
@@ -100,7 +134,7 @@ def _render_markdown(report: Report) -> str:
         "",
         "## 1. 执行摘要",
         "",
-        report.ai_analysis or "暂无 AI 分析。",
+        _display_text(report, report.ai_analysis or "暂无 AI 分析。"),
         "",
         "## 2. 宏观概览",
         "",
@@ -115,9 +149,33 @@ def _render_markdown(report: Report) -> str:
         f"| 文件变更 | {report.total_files_changed} |",
         f"| 代码变更 | +{report.total_additions} / -{report.total_deletions} |",
         "",
-        "## 3. 活动趋势",
+        "## 3. 项目维度",
         "",
+        "| 项目 | 提交 | 贡献者 | 文件 | 代码变更 | 人员贡献 | 综合分析 |",
+        "| --- | ---: | ---: | ---: | ---: | --- | --- |",
     ]
+    for row in report.project_contributions:
+        people = ("、".join(f"{person['name']}({person['commit_count']})" for person in row["contributors"]) or "-").replace("|", "\\|")
+        analysis = _project_analysis(report, str(row["name"]))
+        summary = (
+            f"工作：{_display_text(report, str(analysis['work_summary']))}<br>"
+            f"质量（{analysis['quality_level']}）：{_display_text(report, str(analysis['quality_signal']))}"
+        ).replace("|", "\\|")
+        lines.append(
+            f"| {_display_repository(report, row['name'])} | {row['commit_count']} | {row['contributor_count']} | "
+            f"{row['files_changed']} | +{row['additions']}/-{row['deletions']} | {people} | {summary} |"
+        )
+
+    lines.extend(["", "## 4. 人员维度", "", "| 人员 | 提交 | 活跃天数 | 项目数 | 文件 | 代码变更 | 项目贡献 |", "| --- | ---: | ---: | ---: | ---: | ---: | --- |"])
+    for row in report.person_contributions:
+        projects = ("、".join(f"{_display_repository(report, project['name'])}({project['commits']})" for project in row["projects"]) or "-").replace("|", "\\|")
+        lines.append(
+            f"| {row['name']} | {row['commit_count']} | {row['active_days']} | "
+            f"{row['repository_count']} | {row['files_changed']} | +{row['additions']}/-{row['deletions']} | "
+            f"{projects} |"
+        )
+
+    lines.extend(["", "## 5. 活动趋势", ""])
     if report.daily_trend:
         lines.extend(
             [
@@ -131,45 +189,27 @@ def _render_markdown(report: Report) -> str:
         )
     else:
         lines.append("本周期无提交，暂无趋势数据。")
-    lines.extend(["", "## 4. 仓库活动分布", "", "| 仓库 | 状态 | 提交 | 贡献者 | 文件变更 | 新增 | 删除 | 最近提交 |", "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"])
-    for row in report.repository_activity:
-        lines.append(
-            f"| {row['name']} | {_status_label(str(row['status']))} | {row['commits']} | "
-            f"{row['contributors']} | {row['files_changed']} | +{row['additions']} | -{row['deletions']} | "
-            f"{_last_commit_text(row['last_commit_at'])} |"
-        )
 
-    lines.extend(["", "## 5. 人员协作概览", ""])
-    by_author = report.commits_by_author if isinstance(report, PeriodReport) else _daily_by_author(report)
-    if by_author:
-        lines.extend(["| 人员 | 提交 | 涉及仓库 | 新增 | 删除 |", "| --- | ---: | ---: | ---: | ---: |"])
-        for name, commits in sorted(by_author.items(), key=lambda item: (-len(item[1]), item[0])):
-            lines.append(
-                f"| {name} | {len(commits)} | {len({c.repository for c in commits})} | "
-                f"+{sum(c.additions for c in commits)} | -{sum(c.deletions for c in commits)} |"
-            )
-    else:
-        lines.append("本周期无提交，暂无人员活动数据。")
-
-    lines.extend(["", "## 6. 仓库详情", ""])
+    lines.extend(["", "## 6. 项目贡献明细", ""])
     for repo in report.repositories:
-        lines.extend([f"### {repo.name} ({repo.branch})", ""])
+        lines.extend([f"### {_display_repository(report, repo.name)} ({repo.branch})", ""])
         if repo.error:
             lines.extend([f"> 扫描失败：{repo.error}", ""])
             continue
         if not repo.commits:
             lines.extend(["本周期无提交。", ""])
             continue
+        detail_commits = repo.commits[:_commit_detail_limit(report)]
         lines.extend(
             [
                 f"提交 **{len(repo.commits)}** 次，贡献者 **{len({(c.author_email or c.author_name).lower() for c in repo.commits})}**，"
                 f"代码变更 **+{sum(c.additions for c in repo.commits)} / -{sum(c.deletions for c in repo.commits)}**。",
                 "",
-                "<details><summary>提交明细</summary>",
+                f"<details><summary>提交明细（展示最近 {len(detail_commits)} / {len(repo.commits)} 条）</summary>",
                 "",
                 "| 日期 | 时间 | 提交者 | 提交 | 变更 | 摘要 |",
                 "| --- | --- | --- | --- | ---: | --- |",
-                *[_render_commit_markdown(report, commit) for commit in repo.commits],
+                *[_render_commit_markdown(report, commit) for commit in detail_commits],
                 "",
                 "</details>",
                 "",
@@ -215,25 +255,50 @@ def _render_html(report: Report) -> str:
 <tr><td>同步失败</td><td><strong style="color:#dc2626">{report.failed_repositories}</strong></td></tr>
 <tr><td>提交总数</td><td><strong>{report.total_commits}</strong></td></tr>
 <tr><td>贡献者总数</td><td><strong>{report.contributor_count}</strong></td></tr>"""
-    activity_rows = "".join(
-        f"<tr><td>{escape(str(row['name']))}</td><td>{escape(_status_label(str(row['status'])))}</td>"
-        f"<td>{row['commits']}</td><td>{row['contributors']}</td><td>{row['files_changed']}</td>"
-        f"<td>+{row['additions']}</td><td>-{row['deletions']}</td>"
-        f"<td>{escape(_last_commit_text(row['last_commit_at']))}</td></tr>"
-        for row in report.repository_activity
-    )
+    project_rows = ""
+    for row in report.project_contributions:
+        analysis = _project_analysis(report, str(row["name"]))
+        quality_level = str(analysis["quality_level"])
+        quality_color = {"稳定": "#067647", "需关注": "#b54708"}.get(quality_level, "#667085")
+        evidence = analysis.get("evidence") if isinstance(analysis.get("evidence"), list) else []
+        evidence_html = ""
+        if evidence:
+            evidence_html = (
+                '<details style="margin-top:6px"><summary style="cursor:pointer;color:#475467">查看依据</summary><ul style="margin:5px 0 0;padding-left:18px">'
+                + "".join(f"<li>{escape(_display_text(report, str(item)))}</li>" for item in evidence)
+                + "</ul></details>"
+            )
+        people_html = (
+            "、".join(
+                f"{_render_person_html(person['name'], person.get('is_outsourced'))}({person['commit_count']})"
+                for person in row["contributors"]
+            )
+            or "-"
+        )
+        analysis_html = (
+            '<div style="min-width:260px;line-height:1.55">'
+            f'<div><strong>工作：</strong>{escape(_display_text(report, str(analysis["work_summary"])))}</div>'
+            f'<div style="margin-top:5px"><strong>质量：</strong><span style="color:{quality_color};font-weight:600">{escape(quality_level)}</span> '
+            f'{escape(_display_text(report, str(analysis["quality_signal"])))}</div>{evidence_html}</div>'
+        )
+        project_rows += (
+            f"<tr><td>{escape(_display_repository(report, row['name']))}</td><td>{row['commit_count']}</td>"
+            f"<td>{row['contributor_count']}</td><td>{row['files_changed']}</td>"
+            f"<td>+{row['additions']}/-{row['deletions']}</td><td>{people_html}</td><td>{analysis_html}</td></tr>"
+        )
     trend_rows = "".join(
         f"<tr><td>{escape(str(row['date']))}</td><td>{row['commits']}</td>"
         f"<td>{row['repositories']}</td><td>{row['contributors']}</td></tr>"
         for row in report.daily_trend
     ) or '<tr><td colspan="4">本周期无提交，暂无趋势数据。</td></tr>'
-    by_author = report.commits_by_author if isinstance(report, PeriodReport) else _daily_by_author(report)
-    author_rows = "".join(
-        f"<tr><td>{escape(name)}</td><td>{len(commits)}</td>"
-        f"<td>{len({c.repository for c in commits})}</td>"
-        f"<td>+{sum(c.additions for c in commits)}</td><td>-{sum(c.deletions for c in commits)}</td></tr>"
-        for name, commits in sorted(by_author.items(), key=lambda item: (-len(item[1]), item[0]))
-    ) or '<tr><td colspan="5">本周期无提交，暂无人员活动数据。</td></tr>'
+    person_rows = "".join(
+        f"<tr><td>{_render_person_html(row['name'], row.get('is_outsourced'))}</td><td>{row['commit_count']}</td>"
+        f"<td>{row['active_days']}</td><td>{row['repository_count']}</td>"
+        f"<td>{row['files_changed']}</td><td>+{row['additions']}/-{row['deletions']}</td><td>"
+        + escape("、".join(f"{_display_repository(report, project['name'])}({project['commits']})" for project in row["projects"]) or "-")
+        + "</td></tr>"
+        for row in report.person_contributions
+    ) or '<tr><td colspan="7">人员名单为空。</td></tr>'
 
     repo_sections = []
     for repo in report.repositories:
@@ -242,36 +307,43 @@ def _render_html(report: Report) -> str:
         elif not repo.commits:
             body = '<p style="color:#667085">本周期无提交。</p>'
         else:
-            rows = "".join(
-                f"<tr><td>{commit.activity_at.strftime('%m-%d')}</td><td>{commit.activity_at.strftime('%H:%M')}</td>"
-                f"<td>{escape(_resolve_name(report, commit))}</td><td><code>{commit.sha[:8]}</code></td>"
-                f"<td>+{commit.additions}/-{commit.deletions}</td><td>{escape(commit.subject)}</td></tr>"
-                for commit in repo.commits
-            )
+            detail_commits = repo.commits[:_commit_detail_limit(report)]
+            rows = ""
+            for commit in detail_commits:
+                member = report._resolve_member_info(commit)
+                rows += (
+                    f"<tr><td>{commit.activity_at.strftime('%m-%d')}</td><td>{commit.activity_at.strftime('%H:%M')}</td>"
+                    f"<td>{_render_person_html(member.real_name, member.is_outsourced)}</td><td><code>{commit.sha[:8]}</code></td>"
+                    f"<td>+{commit.additions}/-{commit.deletions}</td><td>{escape(commit.subject)}</td></tr>"
+                )
             body = (
                 f"<p>提交 <strong>{len(repo.commits)}</strong> 次，贡献者 <strong>{len({(c.author_email or c.author_name).lower() for c in repo.commits})}</strong>，"
                 f"代码变更 <strong>+{sum(c.additions for c in repo.commits)}/-{sum(c.deletions for c in repo.commits)}</strong>。</p>"
-                '<details><summary>提交明细</summary>'
+                f'<details><summary>提交明细（展示最近 {len(detail_commits)} / {len(repo.commits)} 条）</summary>'
                 '<table style="width:100%;border-collapse:collapse;font-size:13px">'
                 '<tr style="background:#f2f4f7"><th align="left">日期</th><th align="left">时间</th>'
                 '<th align="left">提交者</th><th align="left">提交</th><th align="left">变更</th><th align="left">摘要</th></tr>'
                 + rows + "</table></details>"
             )
-        repo_sections.append(f"<h3>{escape(repo.name)} <small>({escape(repo.branch)})</small></h3>{body}")
+        repo_sections.append(f"<h3>{escape(_display_repository(report, repo.name))} <small>({escape(repo.branch)})</small></h3>{body}")
+
+    trend_chart_html = ""
+    if report.trend_chart_png:
+        trend_chart_html = '<div style="margin:12px 0 16px"><img src="cid:trend-chart" alt="提交活动趋势图" style="display:block;width:100%;max-width:960px;height:auto;border:0"></div>'
 
     return f"""<!doctype html><html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#101828;max-width:1100px;margin:0 auto;padding:24px">
-<h1>Git {escape(type_label)} | {escape(start)}""" + (f" ~ {escape(end)}" if end != start else "") + f"""</h1>
+<h1>{escape(_report_title(report))}</h1>
 <h2 style="margin-top:0;margin-bottom:12px">0. WeFi-HLB 概览</h2>
 <table style="border-collapse:collapse;width:100%;margin-bottom:24px"><tr style="background:#f2f4f7"><th align="left">指标</th><th align="left">数值</th></tr>
 {overview_rows}
 </table>
-<section style="background:#f0fdfa;border-left:4px solid #0d9488;padding:16px;margin-bottom:24px"><h2 style="margin-top:0">1. 执行摘要</h2>{_render_ai_html(report.ai_analysis)}</section>
+<section style="background:#f0fdfa;border-left:4px solid #0d9488;padding:16px;margin-bottom:24px"><h2 style="margin-top:0">1. 执行摘要</h2>{_render_ai_html(report.ai_analysis, report.organization)}</section>
 <h2>2. 宏观概览</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">指标</th><th align="left">数值</th></tr>
 <tr><td>扫描仓库</td><td>{report.scanned_repositories}</td></tr><tr><td>活跃仓库</td><td>{report.active_repositories}</td></tr><tr><td>无提交仓库</td><td>{report.empty_repositories}</td></tr><tr><td>扫描失败仓库</td><td>{report.failed_repositories}</td></tr><tr><td>贡献者</td><td>{report.contributor_count}</td></tr><tr><td>提交数</td><td>{report.total_commits}</td></tr><tr><td>文件变更</td><td>{report.total_files_changed}</td></tr><tr><td>代码变更</td><td>+{report.total_additions} / -{report.total_deletions}</td></tr></table>
-<h2>3. 活动趋势</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">日期</th><th>提交</th><th>活跃仓库</th><th>贡献者</th></tr>{trend_rows}</table>
-<h2>4. 仓库活动分布</h2><table style="border-collapse:collapse;width:100%;font-size:14px"><tr style="background:#f2f4f7"><th align="left">仓库</th><th align="left">状态</th><th>提交</th><th>贡献者</th><th>文件</th><th>新增</th><th>删除</th><th align="left">最近提交</th></tr>{activity_rows}</table>
-<h2>5. 人员协作概览</h2><table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">人员</th><th>提交</th><th>仓库</th><th>新增</th><th>删除</th></tr>{author_rows}</table>
-<h2>6. 仓库详情</h2>{''.join(repo_sections)}
+<h2>3. 项目维度</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr style="background:#f2f4f7"><th align="left">项目</th><th>提交</th><th>贡献者</th><th>文件</th><th>代码变更</th><th align="left">人员贡献</th><th align="left">综合分析</th></tr>{project_rows}</table>
+<h2>4. 人员维度</h2><table style="border-collapse:collapse;width:100%;font-size:13px"><tr style="background:#f2f4f7"><th align="left">人员</th><th>提交</th><th>活跃天数</th><th>项目</th><th>文件</th><th>代码变更</th><th align="left">项目贡献</th></tr>{person_rows}</table>
+<h2>5. 活动趋势</h2>{trend_chart_html}<table style="border-collapse:collapse;width:100%"><tr style="background:#f2f4f7"><th align="left">日期</th><th>提交</th><th>活跃仓库</th><th>贡献者</th></tr>{trend_rows}</table>
+<h2>6. 项目贡献明细</h2>{''.join(repo_sections)}
 <h2>7. 数据说明</h2><ul><li>提交统计按仓库内 commit SHA 去重，时间范围按报告时区解释。</li><li>增删行是代码活动指标，不直接等同于工作量或绩效。</li><li>AI 分析基于提交信息和统计数据，风险判断需要人工确认。</li></ul>
 </body></html>"""
 

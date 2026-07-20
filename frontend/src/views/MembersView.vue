@@ -22,13 +22,14 @@
         />
 
         <el-card v-loading="contribLoading">
-          <el-table :data="filteredContribs" stripe>
+          <el-table :data="filteredContribs" :row-class-name="activityRowClass" stripe>
             <!-- 姓名 / git 账号 -->
             <el-table-column label="姓名 / Git 账号" min-width="160">
               <template #default="{ row }">
                 <span v-if="row.real_name" style="font-weight: 500">{{ row.real_name }}</span>
                 <span v-if="row.real_name" style="color: #909399; font-size: 12px"> ({{ row.git_name || row.git_email }})</span>
                 <span v-if="!row.real_name" style="color: #606266">{{ row.git_name || row.git_email }}</span>
+                <el-tag v-if="row.is_outsourced" size="small" type="primary" class="identity-tag">外包</el-tag>
                 <el-tag v-if="!row.member_id" size="small" type="warning" style="margin-left: 6px">未认领</el-tag>
               </template>
             </el-table-column>
@@ -61,7 +62,14 @@
               </template>
             </el-table-column>
 
-            <el-table-column prop="last_commit_at" label="最近提交" width="110" />
+            <el-table-column label="最近提交" width="164">
+              <template #default="{ row }">
+                <span>{{ displayLastCommit(row.last_commit_at) }}</span>
+                <el-tag v-if="isStale(row.last_commit_at)" size="small" type="info" class="stale-tag">
+                  {{ row.last_commit_at ? '超过六个月' : '无提交记录' }}
+                </el-tag>
+              </template>
+            </el-table-column>
 
             <!-- 操作 -->
             <el-table-column label="操作" width="120" fixed="right">
@@ -89,11 +97,24 @@
         </div>
 
         <el-card>
-          <el-table :data="members" v-loading="membersLoading" stripe>
+          <el-table :data="sortedMembers" :row-class-name="activityRowClass" v-loading="membersLoading" stripe>
             <el-table-column prop="git_email" label="Git 邮箱" min-width="180" />
             <el-table-column prop="git_name" label="Git 用户名" min-width="120" />
-            <el-table-column prop="real_name" label="真实姓名" min-width="100" />
+            <el-table-column prop="real_name" label="真实姓名" min-width="150">
+              <template #default="{ row }">
+                <span>{{ row.real_name }}</span>
+                <el-tag v-if="row.is_outsourced" size="small" type="primary" class="identity-tag">外包</el-tag>
+              </template>
+            </el-table-column>
             <el-table-column prop="department" label="部门" min-width="100" />
+            <el-table-column label="最近提交" width="164">
+              <template #default="{ row }">
+                <span>{{ displayLastCommit(row.last_commit_at) }}</span>
+                <el-tag v-if="isStale(row.last_commit_at)" size="small" type="info" class="stale-tag">
+                  {{ row.last_commit_at ? '超过六个月' : '无提交记录' }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column label="操作" width="160">
               <template #default="{ row }">
                 <el-button link type="primary" size="small" @click="openDialog(row)">编辑</el-button>
@@ -120,6 +141,14 @@
         <el-form-item label="部门">
           <el-input v-model="form.department" />
         </el-form-item>
+        <el-form-item label="人员类型">
+          <el-switch
+            v-model="form.is_outsourced"
+            active-text="外包"
+            inactive-text="正式员工"
+            @change="markOutsourcingManual"
+          />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -130,7 +159,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import client from '../api/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -143,13 +172,36 @@ const contribSearch = ref('')
 
 const filteredContribs = computed(() => {
   const q = contribSearch.value.trim().toLowerCase()
-  if (!q) return contributors.value
-  return contributors.value.filter(c =>
+  const filtered = !q ? contributors.value : contributors.value.filter(c =>
     c.git_email.toLowerCase().includes(q) ||
     c.git_name.toLowerCase().includes(q) ||
     c.real_name.toLowerCase().includes(q)
   )
+  return [...filtered].sort(compareLastCommit)
 })
+
+const sortedMembers = computed(() => [...members.value].sort(compareLastCommit))
+
+function compareLastCommit(a, b) {
+  const byDate = (b.last_commit_at || '').localeCompare(a.last_commit_at || '')
+  return byDate || (a.real_name || a.git_name || '').localeCompare(b.real_name || b.git_name || '', 'zh-CN')
+}
+
+function sixMonthsAgo() {
+  const cutoff = new Date()
+  cutoff.setHours(0, 0, 0, 0)
+  cutoff.setMonth(cutoff.getMonth() - 6)
+  return cutoff
+}
+
+function isStale(value) {
+  if (!value) return true
+  const timestamp = Date.parse(value.length === 10 ? `${value}T00:00:00` : value)
+  return Number.isNaN(timestamp) || timestamp < sixMonthsAgo().getTime()
+}
+
+function activityRowClass({ row }) { return isStale(row.last_commit_at) ? 'stale-activity-row' : '' }
+function displayLastCommit(value) { return value ? value.slice(0, 10) : '-' }
 
 function repoShortName(full) {
   // "org/repo" → "repo"
@@ -170,11 +222,13 @@ async function fetchContributors() {
 // 认领：预填 git_email / git_name，切换到填写 dialog
 function openClaimDialog(row) {
   editId.value = null
+  outsourcingManuallySet.value = false
   Object.assign(form, {
     git_email: row.git_email,
     git_name: row.git_name,
     real_name: '',
     department: '',
+    is_outsourced: false,
   })
   dialogVisible.value = true
 }
@@ -182,11 +236,13 @@ function openClaimDialog(row) {
 // 从贡献者总览编辑已认领人员
 function openEditFromContrib(row) {
   editId.value = row.member_id
+  outsourcingManuallySet.value = true
   Object.assign(form, {
     git_email: row.git_email,
     git_name: row.git_name,
     real_name: row.real_name,
     department: row.department,
+    is_outsourced: Boolean(row.is_outsourced),
   })
   dialogVisible.value = true
 }
@@ -197,7 +253,15 @@ const membersLoading = ref(false)
 const dialogVisible = ref(false)
 const saving = ref(false)
 const editId = ref(null)
-const form = reactive({ git_email: '', git_name: '', real_name: '', department: '' })
+const outsourcingManuallySet = ref(false)
+const form = reactive({ git_email: '', git_name: '', real_name: '', department: '', is_outsourced: false })
+
+function isOutsourcedName(name) { return String(name || '').trim().toLowerCase().startsWith('v_') }
+function markOutsourcingManual() { outsourcingManuallySet.value = true }
+
+watch(() => form.real_name, value => {
+  if (!outsourcingManuallySet.value) form.is_outsourced = isOutsourcedName(value)
+})
 
 async function fetchMembers() {
   membersLoading.value = true
@@ -209,10 +273,18 @@ async function fetchMembers() {
 function openDialog(row) {
   if (row) {
     editId.value = row.id
-    Object.assign(form, { git_email: row.git_email, git_name: row.git_name, real_name: row.real_name, department: row.department })
+    outsourcingManuallySet.value = true
+    Object.assign(form, {
+      git_email: row.git_email,
+      git_name: row.git_name,
+      real_name: row.real_name,
+      department: row.department,
+      is_outsourced: Boolean(row.is_outsourced),
+    })
   } else {
     editId.value = null
-    Object.assign(form, { git_email: '', git_name: '', real_name: '', department: '' })
+    outsourcingManuallySet.value = false
+    Object.assign(form, { git_email: '', git_name: '', real_name: '', department: '', is_outsourced: false })
   }
   dialogVisible.value = true
 }
@@ -246,3 +318,16 @@ onMounted(() => {
   fetchMembers()
 })
 </script>
+
+<style scoped>
+.stale-tag { margin-left: 6px; }
+.identity-tag { margin-left: 6px; }
+:deep(.el-table .stale-activity-row td.el-table__cell) {
+  background: #f4f4f5 !important;
+  color: #a8abb2;
+}
+:deep(.el-table .stale-activity-row .el-tag) {
+  filter: grayscale(1);
+  opacity: 0.72;
+}
+</style>

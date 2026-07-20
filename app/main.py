@@ -7,18 +7,59 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .ai import analyze, build_context, context_commit_count
+from .ai import SYSTEM_PROMPT, analyze, build_context, build_prompt, context_commit_count, context_source_summary, parse_analysis_response
+from .chart import render_trend_chart
 from .config import AppConfig, load_config
 from .emailer import send_email
 from .github_app import discover_repositories
 from .git_service import scan_repository
 from .models import DailyReport, MemberInfo, PeriodReport, RepositoryReport
+from .periods import format_report_title
 from .report import render_html, render_markdown, render_period_html, render_period_markdown
 from .workflow import WorkflowReporter
 
 REPORT_TOP_LEVEL_SECTION_COUNT = 8
 
 logger = logging.getLogger("git_daily_report")
+
+
+def _repository_details(repositories: list[RepositoryReport]) -> list[dict[str, object]]:
+    return [
+        {
+            "name": repo.name,
+            "status": "failed" if repo.error else ("active" if repo.commits else "empty"),
+            "commits": len(repo.commits),
+            "contributors": len({(commit.author_email or commit.author_name).lower() for commit in repo.commits}),
+            "files_changed": sum(commit.files_changed for commit in repo.commits),
+            "additions": sum(commit.additions for commit in repo.commits),
+            "deletions": sum(commit.deletions for commit in repo.commits),
+            "last_commit_at": max((commit.activity_at for commit in repo.commits), default=None),
+            "error": repo.error,
+        }
+        for repo in repositories
+    ]
+
+
+def _top_contributors(report) -> list[dict[str, object]]:
+    return [
+        {
+            "name": row["name"],
+            "is_outsourced": row.get("is_outsourced"),
+            "commits": row["commit_count"],
+            "repositories": row["repository_count"],
+            "additions": row["additions"],
+            "deletions": row["deletions"],
+        }
+        for row in report.person_contributions[:10]
+        if row["commit_count"]
+    ]
+
+
+def _text_preview(value: str, limit: int = 6000) -> str:
+    if len(value) <= limit:
+        return value
+    head = limit * 2 // 3
+    return value[:head] + "\n...[中间内容已截断]...\n" + value[-(limit - head):]
 
 
 def run_once(
@@ -60,6 +101,7 @@ def run_once(
         workflow.success(
             "period",
             {
+                "process": "根据报告类型、时区和快照条件确定统计周期，不执行 Git 操作。",
                 "period_start": target_date.isoformat(),
                 "period_end": _end.isoformat(),
                 "days": (_end - target_date).days + 1,
@@ -89,6 +131,7 @@ def run_once(
             workflow.skip(
                 "discover_repositories",
                 {
+                    "process": "从活跃项目筛选快照读取仓库范围，不重新调用 GitHub API。",
                     "operation": "reuse_snapshot",
                     "source": "active_snapshot",
                     "snapshot_id": snapshot_id,
@@ -96,15 +139,17 @@ def run_once(
                     "activity_window": snapshot_activity_window,
                 },
             )
-            workflow.start("scan_repositories", {"source": "active_snapshot", "repository_count": len(repositories), "fetch_latest": False})
+            workflow.start("scan_repositories", {"source": "active_snapshot", "repository_count": len(repositories), "repository_names": [repo.name for repo in repositories], "fetch_latest": False})
             scan_failed = sum(1 for repo in repositories if repo.error)
             scan_output = {
+                "process": "复用筛选阶段已经采集的 RepositoryReport，不 fetch、不 clone、不重新执行 git log。",
                 "source": "active_snapshot",
                 "total_repositories": len(repositories),
                 "successful_repositories": len(repositories) - scan_failed,
                 "failed_repositories": scan_failed,
                 "commits_found": sum(len(repo.commits) for repo in repositories),
                 "files_changed": sum(commit.files_changed for repo in repositories for commit in repo.commits),
+                "repository_details": _repository_details(repositories),
             }
             scan_output.update({"operation": "reuse_snapshot", "snapshot_id": snapshot_id})
             if scan_failed:
@@ -139,6 +184,7 @@ def run_once(
                 workflow.success(
                     "discover_repositories",
                     {
+                        "process": "调用 GitHub App 发现可访问仓库，合并静态配置并按名称过滤。",
                         "discovered_repositories": len(repository_configs),
                         "selected_repositories": [repo.name for repo in repository_configs],
                         "fetch_enabled": not skip_fetch,
@@ -161,6 +207,7 @@ def run_once(
                 {
                     "repository_count": len(repository_configs),
                     "workspace": str(workspace),
+                    "repository_names": [repo.name for repo in repository_configs],
                     "fetch_latest": not skip_fetch,
                     "refs": "all" if all(not repo.branch for repo in repository_configs) else "configured",
                 },
@@ -184,11 +231,13 @@ def run_once(
                     workflow.repository_progress(index, len(repository_configs), repo_cfg.name, scan_failed)
             if workflow:
                 scan_output = {
+                    "process": "逐个仓库确保本地 mirror 可用，根据 fetch 配置同步 refs，再用一次 git log --numstat 解析提交。",
                     "total_repositories": len(repositories),
                     "successful_repositories": len(repositories) - scan_failed,
                     "failed_repositories": scan_failed,
                     "commits_found": sum(len(repo.commits) for repo in repositories),
                     "files_changed": sum(commit.files_changed for repo in repositories for commit in repo.commits),
+                    "repository_details": _repository_details(repositories),
                 }
                 if scan_failed:
                     workflow.warning("scan_repositories", scan_output)
@@ -201,10 +250,16 @@ def run_once(
 
     # Build the appropriate report object
     if workflow:
-        workflow.start("aggregate_metrics", {"repository_reports": len(repositories)})
+        workflow.start("aggregate_metrics", {"repository_reports": len(repositories), "repository_names": [repo.name for repo in repositories]})
     try:
         if report_type == "daily" and end_date is None:
-            report: DailyReport | PeriodReport = DailyReport(target_date.isoformat(), datetime.now(timezone), repositories)
+            report: DailyReport | PeriodReport = DailyReport(
+                target_date.isoformat(),
+                datetime.now(timezone),
+                repositories,
+                member_mapping=member_mapping or {},
+                organization=config.github.organization if config.github else "",
+            )
         else:
             report = PeriodReport(
                 report_type=report_type,
@@ -213,11 +268,13 @@ def run_once(
                 generated_at=datetime.now(timezone),
                 repositories=repositories,
                 member_mapping=member_mapping or {},
+                organization=config.github.organization if config.github else "",
             )
         if workflow:
             workflow.success(
                 "aggregate_metrics",
                 {
+                    "process": "在内存中按提交、仓库、贡献者和日期聚合统计，不访问 GitHub 或本地 Git。",
                     "scanned_repositories": report.scanned_repositories,
                     "active_repositories": report.active_repositories,
                     "empty_repositories": report.empty_repositories,
@@ -228,6 +285,11 @@ def run_once(
                     "additions": report.total_additions,
                     "deletions": report.total_deletions,
                     "trend_points": len(report.daily_trend),
+                    "daily_trend": report.daily_trend,
+                    "repository_details": _repository_details(repositories),
+                    "top_contributors": _top_contributors(report),
+                    "project_contributions": report.project_contributions,
+                    "person_contributions": report.person_contributions,
                 },
             )
     except Exception as error:
@@ -235,6 +297,9 @@ def run_once(
             workflow.fail("aggregate_metrics", str(error))
         raise
 
+    ai_context = build_context(report, config.ai.max_commits)
+    ai_context_commits = context_commit_count(report, config.ai.max_commits)
+    ai_prompt = build_prompt(report, config.ai.max_commits)
     if workflow:
         workflow.start(
             "ai_analysis",
@@ -244,13 +309,21 @@ def run_once(
                 "model": config.ai.model,
                 "thinking_enabled": config.ai.thinking_enabled,
                 "max_commits": config.ai.max_commits,
+                "process": "将宏观指标、趋势、仓库摘要和最多 max_commits 条提交明细组装为提示词，调用配置的 AI 模型。",
                 "report_commits": report.total_commits,
-                "context_commits": context_commit_count(report, config.ai.max_commits),
-                "omitted_commits": max(0, report.total_commits - context_commit_count(report, config.ai.max_commits)),
+                "context_commits": ai_context_commits,
+                "omitted_commits": max(0, report.total_commits - ai_context_commits),
+                "context_characters": len(ai_context),
+                "context_preview": _text_preview(ai_context),
+                "prompt_sources": context_source_summary(report, config.ai.max_commits),
+                "system_prompt": SYSTEM_PROMPT,
+                "user_prompt": ai_prompt,
+                "prompt_characters": len(ai_prompt),
             },
         )
     try:
-        report.ai_analysis = analyze(report, config.ai)
+        raw_ai_analysis = analyze(report, config.ai, prompt=ai_prompt)
+        report.ai_analysis, report.project_analyses, structured_ai = parse_analysis_response(raw_ai_analysis, report)
     except Exception as error:
         if workflow:
             workflow.fail("ai_analysis", str(error))
@@ -260,16 +333,22 @@ def run_once(
         or not config.ai.api_key
         or "AI 分析调用失败" in report.ai_analysis
         or "本地规则摘要" in report.ai_analysis
+        or not structured_ai
     )
     if workflow:
-        context_commits = context_commit_count(report, config.ai.max_commits)
+        context_commits = ai_context_commits
         ai_output = {
+            "process": "AI 返回全局 Markdown 和逐项目结构化分析后进行校验；缺失项目使用证据不足降级项。",
             "characters": len(report.ai_analysis),
             "degraded": ai_degraded,
+            "structured_response": structured_ai,
+            "project_analyses": report.project_analyses,
+            "project_analysis_count": len(report.project_analyses),
             "report_commits": report.total_commits,
             "context_commits": context_commits,
             "omitted_commits": max(0, report.total_commits - context_commits),
-            "context_characters": len(build_context(report, config.ai.max_commits)),
+            "context_characters": len(ai_context),
+            "analysis": report.ai_analysis,
         }
         if ai_degraded:
             workflow.warning("ai_analysis", ai_output)
@@ -277,8 +356,9 @@ def run_once(
             workflow.success("ai_analysis", ai_output)
 
     if workflow:
-        workflow.start("render_report", {"template": "unified-period-v3", "report_type": report_type})
+        workflow.start("render_report", {"process": "将报告对象渲染为 Markdown 和 HTML，并写入 Markdown 文件。", "template": "unified-period-v4", "report_type": report_type, "repository_count": report.scanned_repositories, "total_commits": report.total_commits})
     try:
+        report.trend_chart_png = render_trend_chart(report)
         if isinstance(report, DailyReport):
             markdown = render_markdown(report)
             html = render_html(report)
@@ -301,6 +381,8 @@ def run_once(
                     "output_path": str(output_path),
                     "sections": REPORT_TOP_LEVEL_SECTION_COUNT,
                     "repository_sections": len(report.repositories),
+                    "trend_chart": bool(report.trend_chart_png),
+                    "process": "报告内容已生成并持久化 Markdown 文件，HTML 同时写入报告历史。",
                 },
             )
     except Exception as error:
@@ -312,25 +394,26 @@ def run_once(
         logger.info("dry-run 已完成，报告写入 %s", output_path)
         print(markdown)
         if workflow:
-            workflow.skip("send_email", {"reason": "dry_run", "recipients": 0})
+            workflow.skip("send_email", {"process": "dry_run 模式只保存报告，不建立 SMTP 连接。", "reason": "dry_run", "recipients": 0})
     else:
         to_list = recipients if recipients else list(config.email.recipients)
         if not to_list:
             logger.warning("未配置收件人，跳过邮件发送")
             if workflow:
-                workflow.skip("send_email", {"reason": "no_recipients", "recipients": 0})
+                workflow.skip("send_email", {"process": "没有可用收件人，因此跳过 SMTP 发送。", "reason": "no_recipients", "recipients": 0})
         else:
             if workflow:
                 workflow.start(
                     "send_email",
-                    {"recipient_count": len(to_list), "smtp_host": config.email.host, "subject_prefix": config.subject_prefix},
+                    {"process": "建立 SMTP 连接，按收件人配置发送纯文本和 HTML 两种 MIME alternative。", "recipient_count": len(to_list), "smtp_host": config.email.host, "subject_prefix": config.subject_prefix},
                 )
-            type_label = {"daily": "日报", "weekly": "周报", "monthly": "月报"}.get(report_type, report_type)
             total = report.total_commits
-            if report_type == "daily" and end_date is None:
-                subject = f"{config.subject_prefix} | {target_date.isoformat()} | {total} 次提交"
-            else:
-                subject = f"{config.subject_prefix} {type_label} | {target_date.isoformat()} ~ {_end.isoformat()} | {total} 次提交"
+            subject = format_report_title(
+                report_type,
+                target_date,
+                _end,
+                config.github.organization if config.github else "",
+            )
             from .config import EmailConfig
             email_cfg = config.email
             if recipients:
@@ -345,13 +428,19 @@ def run_once(
                     use_ssl=config.email.use_ssl,
                 )
             try:
-                send_email(email_cfg, subject, markdown, html)
+                send_email(
+                    email_cfg,
+                    subject,
+                    markdown,
+                    html,
+                    inline_images={"trend-chart": report.trend_chart_png} if report.trend_chart_png else None,
+                )
             except Exception as error:
                 if workflow:
                     workflow.fail("send_email", str(error))
                 raise
             if workflow:
-                workflow.success("send_email", {"recipient_count": len(to_list), "subject": subject})
+                workflow.success("send_email", {"process": "SMTP 已成功接受邮件，报告历史随后记录 email_sent_at。", "recipient_count": len(to_list), "subject": subject})
             logger.info("报告邮件已发送至 %s", ", ".join(to_list))
 
     return report
@@ -391,7 +480,7 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="立即运行一次")
     parser.add_argument("--date", help="日报日期，格式 YYYY-MM-DD；默认昨天")
     parser.add_argument("--end-date", help="结束日期（用于周报/月报），格式 YYYY-MM-DD")
-    parser.add_argument("--report-type", default="daily", choices=["daily", "weekly", "monthly"], help="报告类型")
+    parser.add_argument("--report-type", default="daily", choices=["daily", "weekly", "monthly", "yearly"], help="报告类型")
     parser.add_argument("--dry-run", action="store_true", help="不发邮件，仅输出日报")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()

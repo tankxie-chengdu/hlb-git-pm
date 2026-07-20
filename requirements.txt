@@ -9,6 +9,7 @@ sqlalchemy>=2.0.0
 bcrypt>=4.0.0
 python-multipart>=0.0.9
 Markdown>=3.7
+Pillow>=10.0.0
 
 # 调度
 apscheduler>=3.10.0

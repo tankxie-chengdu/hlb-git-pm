@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -29,6 +30,7 @@ class MemberCreate(BaseModel):
     git_name: str = ""
     real_name: str = ""
     department: str = ""
+    is_outsourced: Optional[bool] = None
 
 
 class MemberUpdate(BaseModel):
@@ -36,6 +38,7 @@ class MemberUpdate(BaseModel):
     git_name: Optional[str] = None
     real_name: Optional[str] = None
     department: Optional[str] = None
+    is_outsourced: Optional[bool] = None
 
 
 class MemberOut(BaseModel):
@@ -44,6 +47,8 @@ class MemberOut(BaseModel):
     git_name: str
     real_name: str
     department: str
+    is_outsourced: bool = False
+    last_commit_at: str = ""
 
     class Config:
         from_attributes = True
@@ -115,7 +120,9 @@ class ScheduleOut(BaseModel):
 
 # --- Reports ---
 class ReportTrigger(BaseModel):
-    report_type: Literal["daily", "weekly", "monthly"] = "daily"
+    report_type: Literal["daily", "weekly", "monthly", "yearly"] = "daily"
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
     repo_names: list[str] = Field(default_factory=list, description="指定仓库列表，空 = 全部")
     skip_fetch: bool = Field(True, description="跳过 git fetch，直接用本地缓存")
     snapshot_id: Optional[int] = Field(None, description="活跃项目筛选结果快照")
@@ -124,7 +131,9 @@ class ReportTrigger(BaseModel):
 
 
 class ActiveRepositoriesRequest(BaseModel):
-    report_type: Literal["daily", "weekly", "monthly"] = "daily"
+    report_type: Literal["daily", "weekly", "monthly", "yearly"] = "daily"
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
     skip_fetch: bool = True
     activity_window: Optional[Literal["today", "this_week", "this_month"]] = None
 
@@ -140,6 +149,7 @@ class ReportOut(BaseModel):
     status: str
     error: Optional[str]
     email_sent_at: Optional[str]
+    email_recipients: list[str] = Field(default_factory=list)
     created_at: str
     selection_snapshot_id: Optional[int] = None
 
@@ -151,6 +161,7 @@ class ReportDetail(ReportOut):
     markdown: str
     html: str
     ai_analysis: str
+    project_analyses: list[dict] = Field(default_factory=list)
 
 
 class ReportStepOut(BaseModel):

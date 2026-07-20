@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from app.periods import resolve_period
+from app.periods import format_report_title, resolve_period
 
 logger = logging.getLogger("hlb-git-pm.scheduler")
 
@@ -38,6 +39,7 @@ def _execute_scheduled_report(report_type: str, timezone: str) -> None:
             report_type=report_type,
             period_start=start_date.isoformat(),
             period_end=end_date.isoformat(),
+            title=format_report_title(report_type, start_date, end_date, _app_config.github.organization if _app_config.github else ""),
             status="running",
             created_at=datetime.now().isoformat(),
         )
@@ -52,10 +54,16 @@ def _execute_scheduled_report(report_type: str, timezone: str) -> None:
         members = session.query(Member).all()
         mapping: dict[str, MemberInfo] = {}
         for m in members:
+            info = MemberInfo(real_name=m.real_name, department=m.department, is_outsourced=m.is_outsourced)
             if m.git_email:
-                mapping[m.git_email.lower()] = MemberInfo(real_name=m.real_name, department=m.department)
+                email = m.git_email.strip().casefold()
+                mapping[email] = info
+                mapping[email.split("@", 1)[0]] = info
             if m.git_name:
-                mapping[m.git_name] = MemberInfo(real_name=m.real_name, department=m.department)
+                mapping[m.git_name.strip().casefold()] = info
+            roster_account, separator, _ = (m.real_name or "").partition("(")
+            if separator and roster_account.strip():
+                mapping[roster_account.strip().casefold()] = info
 
         # Build recipient list
         recipients_query = session.query(Recipient).filter(Recipient.is_active == True)
@@ -66,6 +74,8 @@ def _execute_scheduled_report(report_type: str, timezone: str) -> None:
         elif report_type == "monthly":
             recipients_query = recipients_query.filter(Recipient.receive_monthly == True)
         recipient_emails = [r.email for r in recipients_query.all()]
+        record.email_recipients_json = json.dumps(recipient_emails or list(_app_config.email.recipients), ensure_ascii=False)
+        session.commit()
 
         result = run_once(
             _app_config,
@@ -90,8 +100,10 @@ def _execute_scheduled_report(report_type: str, timezone: str) -> None:
                 rec.markdown = render_markdown(result)
                 rec.html = render_html(result)
             rec.ai_analysis = result.ai_analysis
+            rec.project_analysis_json = json.dumps(result.project_analyses, ensure_ascii=False)
+            rec.trend_chart_png = result.trend_chart_png
             rec.total_commits = result.total_commits
-            rec.title = f"{report_type} {start_date.isoformat()} ~ {end_date.isoformat()}"
+            rec.title = format_report_title(report_type, start_date, end_date, _app_config.github.organization if _app_config.github else "")
             rec.status = "sent"
             rec.email_sent_at = datetime.now().isoformat()
             session.commit()

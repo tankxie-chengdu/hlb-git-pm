@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Column, Integer, String, Text, UniqueConstraint
+import json
+
+from sqlalchemy import Boolean, Column, Integer, LargeBinary, String, Text, UniqueConstraint
 
 from .database import Base
 
@@ -23,6 +25,7 @@ class Member(Base):
     git_name = Column(String, nullable=False, default="")
     real_name = Column(String, nullable=False, default="")
     department = Column(String, nullable=False, default="")
+    is_outsourced = Column(Boolean, nullable=False, default=False)
 
 
 class Recipient(Base):
@@ -61,12 +64,31 @@ class ReportHistory(Base):
     markdown = Column(Text, nullable=False, default="")
     html = Column(Text, nullable=False, default="")
     ai_analysis = Column(Text, nullable=False, default="")
+    project_analysis_json = Column(Text, nullable=False, default="[]")
+    trend_chart_png = Column(LargeBinary, nullable=True)
     total_commits = Column(Integer, nullable=False, default=0)
     status = Column(String, nullable=False, default="running")
     error = Column(Text, nullable=True)
     email_sent_at = Column(String, nullable=True)
+    email_recipients_json = Column(Text, nullable=False, default="[]")
     created_at = Column(String, nullable=False)
     selection_snapshot_id = Column(Integer, nullable=True, index=True)
+
+    @property
+    def project_analyses(self) -> list[dict]:
+        try:
+            value = json.loads(self.project_analysis_json or "[]")
+            return value if isinstance(value, list) else []
+        except (TypeError, json.JSONDecodeError):
+            return []
+
+    @property
+    def email_recipients(self) -> list[str]:
+        try:
+            value = json.loads(self.email_recipients_json or "[]")
+            return [str(item) for item in value] if isinstance(value, list) else []
+        except (TypeError, json.JSONDecodeError):
+            return []
 
 
 class ReportStep(Base):
