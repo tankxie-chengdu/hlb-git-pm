@@ -377,6 +377,12 @@ async function copyGitCommand(repo) {
 
     let command = 'git'
 
+    // Add performance parameters for stable large transfers
+    command += ` -c core.compression=0`
+    command += ` -c http.postBuffer=524288000`
+    command += ` -c http.lowSpeedLimit=0`
+    command += ` -c http.lowSpeedTime=999999`
+
     // Add proxy options based on URL protocol (only if enabled)
     if (proxy.enabled) {
       // Determine protocol from clone URL
