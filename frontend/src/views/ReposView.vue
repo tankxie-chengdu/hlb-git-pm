@@ -109,15 +109,14 @@
             </el-button>
 
             <!-- 复制命令按钮 -->
-            <el-tooltip content="复制 git 克隆命令到剪贴板" placement="top">
-              <el-button
-                link
-                size="small"
-                icon="DocumentCopy"
-                @click.stop="copyGitCommand(repo)"
-                style="padding: 0"
-              />
-            </el-tooltip>
+            <el-button
+              type="info"
+              size="small"
+              @click.stop="copyGitCommand(repo)"
+            >
+              <el-icon style="margin-right: 4px"><DocumentCopy /></el-icon>
+              复制命令
+            </el-button>
 
             <!-- 展开按钮 -->
             <el-button
