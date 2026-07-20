@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from app.ai import analyze, build_context, build_prompt, parse_analysis_response
+from app.ai import analyze, analyze_yearly, build_context, build_prompt, parse_analysis_response
 from app.config import AiConfig
 from app.models import Commit, DailyReport, MemberInfo, PeriodReport, RepositoryReport
 
@@ -23,6 +23,9 @@ class _Response:
 
 
 class AiTests(unittest.TestCase):
+    def test_ai_timeout_defaults_to_five_minutes(self):
+        self.assertEqual(AiConfig().timeout_seconds, 300)
+
     def test_zai_thinking_flag_is_sent(self):
         config = AiConfig(
             base_url="https://api.z.ai/api/coding/paas/v4",
@@ -84,6 +87,33 @@ class AiTests(unittest.TestCase):
         self.assertIn("first-0", context)
         self.assertIn("second-0", context)
         self.assertNotIn("first-1", context)
+
+    def test_yearly_analysis_uses_project_batches_then_global_synthesis(self):
+        reports = [
+            RepositoryReport(
+                name,
+                "all branches",
+                [Commit(name, "abc", "Alice", "alice@example.com", datetime.now(timezone.utc), f"{name}-change")],
+            )
+            for name in ("first", "second")
+        ]
+        report = PeriodReport("yearly", "2026-01-01", "2026-07-20", datetime.now(timezone.utc), reports)
+        config = AiConfig(api_key="test-key", thinking_enabled=False, yearly_project_batch_size=1)
+        responses = [
+            _Response({"choices": [{"message": {"content": json.dumps({"project_analyses": [{"repository": "first", "work_summary": "第一项目", "quality_signal": "有提交证据", "quality_level": "证据不足", "evidence": ["1 次提交"], "confidence": "中"}]}, ensure_ascii=False)}}]}),
+            _Response({"choices": [{"message": {"content": json.dumps({"project_analyses": [{"repository": "second", "work_summary": "第二项目", "quality_signal": "有提交证据", "quality_level": "证据不足", "evidence": ["1 次提交"], "confidence": "中"}]}, ensure_ascii=False)}}]}),
+            _Response({"choices": [{"message": {"content": json.dumps({"analysis_markdown": "全局汇总"}, ensure_ascii=False)}}]}),
+        ]
+        with patch("app.ai.urllib.request.urlopen", side_effect=responses) as request:
+            result = analyze_yearly(report, config)
+        payload = json.loads(result["raw_response"])
+        self.assertEqual(request.call_count, 3)
+        self.assertEqual(result["strategy"], "yearly_project_batches")
+        self.assertEqual(result["batch_count"], 2)
+        self.assertEqual(result["synthesis"]["status"], "success")
+        self.assertEqual(payload["analysis_markdown"], "全局汇总")
+        self.assertEqual({item["repository"] for item in payload["project_analyses"]}, {"first", "second"})
+        self.assertTrue(all(call.kwargs["timeout"] == 300 for call in request.call_args_list))
 
     def test_structured_analysis_is_validated_and_completed(self):
         report = PeriodReport(

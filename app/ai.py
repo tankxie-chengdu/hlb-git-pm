@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
+from typing import Any, Callable
 
 from .config import AiConfig
 from .models import DailyReport, PeriodReport
@@ -265,6 +267,300 @@ def fallback_analysis(report: DailyReport | PeriodReport) -> str:
     )
 
 
+def _json_candidate(value: str) -> object:
+    """Decode a model response that may be wrapped in a JSON code fence."""
+    candidate = (value or "").strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", candidate, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1)
+    return json.loads(candidate)
+
+
+def _normalize_project_analysis(item: object, project_names: set[str]) -> dict[str, object] | None:
+    if not isinstance(item, dict):
+        return None
+    repository = _clean_text(item.get("repository"), 300)
+    if repository not in project_names:
+        return None
+    quality_signal = _clean_text(item.get("quality_signal"), 240) or "未提供工程质量信号。"
+    quality_level = _clean_text(item.get("quality_level"), 20)
+    confidence = _clean_text(item.get("confidence"), 10)
+    if any(term in quality_signal for term in SUBJECTIVE_QUALITY_TERMS):
+        quality_signal = "模型返回了主观质量评价，已降级；需结合代码审查、测试和 CI 结果确认。"
+        quality_level = "证据不足"
+        confidence = "低"
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), list) else []
+    return {
+        "repository": repository,
+        "work_summary": _clean_text(item.get("work_summary"), 240) or "未提供工作主题摘要。",
+        "quality_signal": quality_signal,
+        "quality_level": quality_level if quality_level in QUALITY_LEVELS else "证据不足",
+        "evidence": [_clean_text(entry, 120) for entry in evidence[:3] if _clean_text(entry, 120)],
+        "confidence": confidence if confidence in CONFIDENCE_LEVELS else "低",
+    }
+
+
+def parse_project_batch_response(
+    value: str,
+    projects: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], bool, str | None]:
+    """Parse one yearly project-batch response and fill missing projects safely."""
+    project_names = {str(row["name"]) for row in projects}
+    try:
+        payload = _json_candidate(value)
+        if not isinstance(payload, dict) or not isinstance(payload.get("project_analyses"), list):
+            raise ValueError("AI 批次响应缺少 project_analyses")
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        return ([_fallback_project_analysis(row) for row in projects], False, str(error))
+
+    parsed: dict[str, dict[str, object]] = {}
+    for item in payload["project_analyses"]:
+        normalized = _normalize_project_analysis(item, project_names)
+        if normalized and normalized["repository"] not in parsed:
+            parsed[str(normalized["repository"])] = normalized
+    completed = [parsed.get(str(row["name"])) or _fallback_project_analysis(row) for row in projects]
+    missing = len(parsed) != len(project_names)
+    return completed, not missing, (f"批次缺少 {len(project_names) - len(parsed)} 个项目" if missing else None)
+
+
+def _commit_prompt_record(report: DailyReport | PeriodReport, commit) -> dict[str, object]:
+    return {
+        "repository": commit.repository,
+        "sha": commit.sha[:12],
+        "author": report._resolve_name(commit),
+        "activity_at": commit.activity_at.isoformat(),
+        "subject": commit.subject,
+        "files_changed": commit.files_changed,
+        "additions": commit.additions,
+        "deletions": commit.deletions,
+    }
+
+
+def _yearly_project_batch_prompt(
+    report: PeriodReport,
+    projects: list[dict[str, object]],
+    selected_commits: dict[str, list],
+    batch_number: int,
+    batch_count: int,
+) -> str:
+    project_names = {str(row["name"]) for row in projects}
+    commit_records = [
+        _commit_prompt_record(report, commit)
+        for repo in report.repositories
+        if repo.name in project_names
+        for commit in selected_commits.get(repo.name, [])
+    ]
+    return (
+        f"这是 Git 年报的项目分批分析，第 {batch_number}/{batch_count} 批。统计周期：{report.period_start} ~ {report.period_end}。"
+        "只返回一个合法 JSON 对象，不要使用代码围栏或额外文字。"
+        "顶层结构必须是 {\"project_analyses\":[...]}，每个项目必须输出 repository、work_summary、"
+        "quality_signal、quality_level、evidence、confidence。只能依据输入事实，无法判断时使用证据不足。"
+        "不要把提交数或代码行数直接等同于绩效。\n\n"
+        "项目聚合数据：\n"
+        + json.dumps(projects, ensure_ascii=False, default=str)
+        + "\n\n提交主题样本：\n"
+        + json.dumps(commit_records, ensure_ascii=False, default=str)
+    )
+
+
+def _yearly_global_context(
+    report: PeriodReport,
+    project_analyses: list[dict[str, object]],
+    max_commits: int,
+) -> tuple[str, list[dict[str, object]]]:
+    """Build a smaller synthesis context after project batches finish."""
+    sections = _context_sections(report, max_commits)
+    selected_keys = {"scope", "metrics", "person_contributions", "repository_activity", "daily_trend"}
+    lines: list[str] = []
+    sources: list[dict[str, object]] = []
+    for section in sections:
+        if section["key"] not in selected_keys:
+            continue
+        section_lines = "\n".join(section["lines"])
+        lines.extend(section["lines"])
+        sources.append(
+            {
+                "key": section["key"],
+                "label": section["label"],
+                "origin": section["origin"],
+                "records": section["records"],
+                "included_records": section["included_records"],
+                "omitted_records": section["omitted_records"],
+                "characters": len(section_lines),
+                "details": section["details"],
+            }
+        )
+    batch_text = json.dumps(project_analyses, ensure_ascii=False, default=str)
+    lines.extend(["项目分批分析结果:", batch_text])
+    sources.append(
+        {
+            "key": "yearly_project_batches",
+            "label": "项目分批分析",
+            "origin": "按项目批次调用 AI 后合并",
+            "records": len(project_analyses),
+            "included_records": len(project_analyses),
+            "omitted_records": 0,
+            "characters": len(batch_text),
+            "details": {"project_count": len(project_analyses)},
+        }
+    )
+    return "\n".join(lines), sources
+
+
+def _yearly_synthesis_prompt(report: PeriodReport, context: str) -> str:
+    return (
+        "请根据以下 Git 年报统计上下文和已完成的项目分批分析，生成面向研发负责人的简洁中文全局分析。"
+        "只返回一个合法 JSON 对象，不要使用代码围栏或额外文字。顶层结构必须是 "
+        "{\"analysis_markdown\":\"完整 Markdown 分析\"}。"
+        "analysis_markdown 严格包含：1) 执行摘要；2) 项目维度总体进展；3) 人员维度总体贡献；"
+        "4) 工作分配与协作信号；5) 风险及需要核实的事项；6) 下一周期建议。"
+        "必须区分事实、推断和建议；提交数、代码行数不直接等同于绩效；不要臆造代码质量或需求完成度。\n\n"
+        + context
+    )
+
+
+def _request_completion(config: AiConfig, prompt: str) -> str:
+    request_body = {
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+    if config.thinking_enabled is not None:
+        request_body["thinking"] = {"type": "enabled" if config.thinking_enabled else "disabled"}
+    payload = json.dumps(request_body).encode("utf-8")
+    request = urllib.request.Request(
+        f"{config.base_url}/chat/completions",
+        data=payload,
+        headers={"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    message = result["choices"][0]["message"]
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("AI 返回空正文，可能只返回了 reasoning_content")
+    return content.strip()
+
+
+def analyze_yearly(
+    report: PeriodReport,
+    config: AiConfig,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, Any]:
+    """Analyze yearly reports in project batches, then synthesize globally."""
+    if not config.enabled or not config.api_key:
+        return {
+            "raw_response": fallback_analysis(report),
+            "degraded": True,
+            "strategy": "fallback",
+            "batch_size": config.yearly_project_batch_size,
+            "batch_count": 0,
+            "batches": [],
+            "synthesis": {"status": "skipped", "reason": "AI 未启用或未配置 API key"},
+        }
+
+    projects = list(report.project_contributions)
+    batch_size = max(1, config.yearly_project_batch_size)
+    project_batches = [projects[index:index + batch_size] for index in range(0, len(projects), batch_size)]
+    selected_commits = _stratified_commits(report, config.max_commits)
+    batch_details: list[dict[str, object]] = []
+    project_analyses: list[dict[str, object]] = []
+    degraded = False
+
+    for index, batch in enumerate(project_batches, start=1):
+        prompt = _yearly_project_batch_prompt(report, batch, selected_commits, index, len(project_batches))
+        started = time.monotonic()
+        error_text = None
+        status = "success"
+        raw_batch = ""
+        try:
+            raw_batch = _request_completion(config, prompt)
+            analyses, structured, parse_error = parse_project_batch_response(raw_batch, batch)
+            if not structured:
+                status = "warning"
+                error_text = parse_error
+                degraded = True
+        except (OSError, urllib.error.HTTPError, KeyError, IndexError, ValueError, json.JSONDecodeError) as error:
+            analyses = [_fallback_project_analysis(row) for row in batch]
+            status = "warning"
+            error_text = str(error)
+            degraded = True
+        project_analyses.extend(analyses)
+        batch_details.append(
+            {
+                "batch_number": index,
+                "batch_count": len(project_batches),
+                "status": status,
+                "project_names": [str(row["name"]) for row in batch],
+                "project_count": len(batch),
+                "selected_commit_count": sum(len(selected_commits.get(str(row["name"]), [])) for row in batch),
+                "prompt_characters": len(prompt),
+                "prompt_preview": prompt[:2000],
+                "output_project_count": len(analyses),
+                "response_preview": raw_batch[:2000],
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "error": error_text,
+            }
+        )
+        if progress_callback:
+            progress_callback(
+                {
+                    "process": f"已完成年报项目批次 {index}/{len(project_batches)}，准备继续分析。",
+                    "progress": int(index * 100 / (len(project_batches) + 1)),
+                    "analysis_stages": {
+                        "strategy": "yearly_project_batches",
+                        "batch_size": batch_size,
+                        "batch_count": len(project_batches),
+                        "completed_batches": index,
+                        "batches": batch_details,
+                    },
+                }
+            )
+
+    global_context, global_sources = _yearly_global_context(report, project_analyses, config.max_commits)
+    synthesis_prompt = _yearly_synthesis_prompt(report, global_context)
+    synthesis_started = time.monotonic()
+    synthesis_status = "success"
+    synthesis_error = None
+    try:
+        raw_synthesis = _request_completion(config, synthesis_prompt)
+        payload = _json_candidate(raw_synthesis)
+        analysis_markdown = str(payload.get("analysis_markdown") or "").strip() if isinstance(payload, dict) else ""
+        if not analysis_markdown:
+            raise ValueError("AI 汇总响应缺少 analysis_markdown")
+    except (OSError, urllib.error.HTTPError, KeyError, IndexError, ValueError, json.JSONDecodeError) as error:
+        analysis_markdown = fallback_analysis(report)
+        synthesis_status = "warning"
+        synthesis_error = str(error)
+        degraded = True
+
+    raw_response = json.dumps(
+        {"analysis_markdown": analysis_markdown, "project_analyses": project_analyses},
+        ensure_ascii=False,
+    )
+    return {
+        "raw_response": raw_response,
+        "degraded": degraded,
+        "strategy": "yearly_project_batches",
+        "batch_size": batch_size,
+        "batch_count": len(project_batches),
+        "batches": batch_details,
+        "synthesis": {
+            "status": synthesis_status,
+            "prompt_characters": len(synthesis_prompt),
+            "context_characters": len(global_context),
+            "duration_ms": int((time.monotonic() - synthesis_started) * 1000),
+            "error": synthesis_error,
+        },
+        "synthesis_prompt": synthesis_prompt,
+        "global_prompt_sources": global_sources,
+    }
+
+
 def build_prompt(report: DailyReport | PeriodReport, max_commits: int) -> str:
     context = build_context(report, max_commits)
     if isinstance(report, PeriodReport):
@@ -373,30 +669,7 @@ def analyze(report: DailyReport | PeriodReport, config: AiConfig, prompt: str | 
     if not config.enabled or not config.api_key:
         return fallback_analysis(report)
     prompt = prompt if prompt is not None else build_prompt(report, config.max_commits)
-    request_body = {
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
-    if config.thinking_enabled is not None:
-        request_body["thinking"] = {"type": "enabled" if config.thinking_enabled else "disabled"}
-    payload = json.dumps(request_body).encode("utf-8")
-    request = urllib.request.Request(
-        f"{config.base_url}/chat/completions",
-        data=payload,
-        headers={"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(request, timeout=config.timeout_seconds) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        message = result["choices"][0]["message"]
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("AI 返回空正文，可能只返回了 reasoning_content")
-        return content.strip()
+        return _request_completion(config, prompt)
     except (OSError, urllib.error.HTTPError, KeyError, IndexError, ValueError, json.JSONDecodeError) as error:
         return fallback_analysis(report) + f"\n\n> AI 分析调用失败，已降级为规则摘要：{error}"

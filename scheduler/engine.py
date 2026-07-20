@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -41,7 +41,7 @@ def _execute_scheduled_report(report_type: str, timezone: str) -> None:
             period_end=end_date.isoformat(),
             title=format_report_title(report_type, start_date, end_date, _app_config.github.organization if _app_config.github else ""),
             status="running",
-            created_at=datetime.now().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
         session.add(record)
         session.commit()

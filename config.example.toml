@@ -31,7 +31,8 @@ enabled = true
 base_url = "https://api.z.ai/api/coding/paas/v4"
 api_key = "${ZAI_API_KEY}"
 model = "glm-5.2"
-timeout_seconds = 60
+timeout_seconds = 300
+yearly_project_batch_size = 10
 max_commits = 80
 thinking_enabled = false
 

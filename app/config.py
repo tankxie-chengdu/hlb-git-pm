@@ -79,8 +79,9 @@ class AiConfig:
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4o-mini"
-    timeout_seconds: int = 60
+    timeout_seconds: int = 300
     max_commits: int = 80
+    yearly_project_batch_size: int = 10
     thinking_enabled: bool | None = None
 
 
@@ -170,8 +171,9 @@ def load_config(path: str | Path) -> AppConfig:
             base_url=_ai_base,
             api_key=str(ai_raw.get("api_key", "")),
             model=str(ai_raw.get("model", "gpt-4o-mini")),
-            timeout_seconds=int(ai_raw.get("timeout_seconds", 60)),
+            timeout_seconds=int(ai_raw.get("timeout_seconds", 300)),
             max_commits=int(ai_raw.get("max_commits", 80)),
+            yearly_project_batch_size=max(1, int(ai_raw.get("yearly_project_batch_size", 10))),
             thinking_enabled=(
                 bool(ai_raw["thinking_enabled"]) if "thinking_enabled" in ai_raw else None
             ),

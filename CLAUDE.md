@@ -1,84 +1,68 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance for working with the HLB Git PM repository.
 
-## Project Overview
+## Project overview
 
-A scheduled Git commit reporting daemon. It scans Git repositories (local paths or GitHub org via GitHub App), collects daily commits, optionally analyzes them with an LLM, renders a markdown/HTML report, and sends it via email. No web server, no database — purely a batch processor.
+HLB Git PM is a FastAPI + Vue application that discovers private GitHub repositories through a GitHub App, maintains local Git mirrors, calculates commit and contributor metrics, optionally calls an OpenAI-compatible AI service, renders Markdown/HTML reports, and sends them by SMTP. The web UI and APScheduler run from the same `run.py` process.
 
 ## Commands
 
-**Run tests:**
 ```bash
-python -m pytest
-# or
-python -m unittest discover
+# Backend tests
+python3 -m pytest
+
+# Frontend build
+cd frontend && npm ci && npm run build
+
+# Local server and scheduler
+python3 run.py --config config.toml --verbose
+
+# Docker image (choose the target server architecture)
+docker buildx build --platform linux/amd64 -t hlb-git-pm:latest --load .
 ```
 
-**Run a single test file:**
-```bash
-python -m pytest tests/test_config.py
-```
-
-**One-shot execution (dry run, no email sent):**
-```bash
-python -m app --config config.toml --once --dry-run
-```
-
-**One-shot for a specific date:**
-```bash
-python -m app --config config.toml --once --date 2025-01-15
-```
-
-**Continuous scheduler mode:**
-```bash
-python -m app --config config.toml
-```
-
-**Docker:**
-```bash
-docker build -t git-daily-report .
-docker run -d --name git-daily-report --restart unless-stopped \
-  -v "$PWD/config.toml:/app/config.toml:ro" \
-  -v "$PWD/.data:/app/.data" \
-  --env-file .env git-daily-report
-```
-
-**Install dependencies:**
-```bash
-pip install -r requirements.txt
-```
+`config.toml`, `secrets/`, and `.data/` are local deployment state and must not be committed or copied into an image. Use `config.example.toml` as the template and inject API/SMTP credentials through environment variables.
 
 ## Architecture
 
-The processing pipeline in `app/main.py`:
-1. `run_once()` — orchestrates the full flow for a single date
-2. Discover repos (static config + GitHub App auto-discovery via `app/github_app.py`)
-3. Clone/fetch and scan each repo for commits in the date range (`app/git_service.py`)
-4. Optionally call an OpenAI-compatible LLM for analysis (`app/ai.py`)
-5. Render markdown + HTML (`app/report.py`)
-6. Send email via SMTP (`app/emailer.py`)
+- `app/main.py`: report orchestration, scanning, AI analysis, rendering, and email delivery.
+- `app/git_service.py`: Git mirror clone/fetch and batched `git log --numstat` parsing.
+- `app/github_app.py`: GitHub App JWT, installation token, and repository discovery.
+- `app/ai.py`: OpenAI-compatible requests, structured parsing, fallbacks, and yearly project-batch analysis.
+- `app/report.py`: Markdown and HTML report templates.
+- `web/app.py`: FastAPI application, API routers, database initialization, and frontend SPA serving.
+- `web/api/`: authenticated API endpoints for repositories, reports, members, recipients, schedules, and settings.
+- `scheduler/engine.py`: database-backed APScheduler jobs. Run only one scheduler replica.
+- `frontend/src/`: Vue 3 + Element Plus frontend; production assets are built into `frontend/dist`.
+- `tests/`: backend unit and integration tests.
 
-`run_scheduler()` in `app/main.py` loops forever, calculating the next run time using `zoneinfo` + the configured `run_at` time.
+## Data and deployment
 
-**Key design choices:**
-- Config is loaded into frozen dataclasses (`app/config.py`); env vars are injected via `${VAR_NAME}` syntax at load time.
-- Git operations never raise — they return error strings embedded in `RepositoryReport`, so one failing repo doesn't block the email.
-- AI analysis degrades gracefully: if disabled or the API call fails, a rule-based fallback summary is used instead.
-- GitHub App auth uses short-lived JWT → installation token flow (`app/github_app.py`). Git clone auth uses a temporary `GIT_ASKPASS` shell script.
+The default SQLite database, Git mirrors, report files, and snapshots live under `.data/`. Persist this directory when running Docker. A single container is the supported deployment shape because the scheduler and SQLite state are local to the process and volume.
 
-**Data flow through models (`app/models.py`):**
-- `Commit` — one commit (repo, SHA, author, timestamp, subject, diff stats)
-- `RepositoryReport` — all commits for one repo on a given day, plus optional error string
-- `DailyReport` — aggregates all `RepositoryReport`s, holds AI analysis text, exposes computed totals
+Mount these files/directories into a container:
+
+```text
+/app/config.toml       read-only configuration
+/app/secrets/          read-only GitHub App private key
+/app/.data/            read-write database, mirrors, and reports
+```
+
+Put the container behind HTTPS and do not expose the internal port directly to the public Internet. Set `JWT_SECRET_KEY` and replace the seeded development admin password before production use.
 
 ## Configuration
 
-Copy `config.example.toml` to `config.toml` (gitignored). Key sections:
-- Root: `timezone`, `run_at`, `workspace` (where repos are cloned), `subject_prefix`
-- `[[repositories]]`: static repo list; each entry has `name`, `branch`, and either `path` (local) or `url` (clone)
-- `[github]`: GitHub App credentials for org-wide repo discovery
-- `[email]`: SMTP settings; `recipients` is a list
-- `[ai]`: LLM settings; `base_url` + `api_key` + `model`; set `enabled = false` to skip
+- Root settings: `timezone`, `run_at`, `workspace`, `db_path`.
+- `[github]`: organization, App ID, installation ID, and private key path.
+- `[ai]`: OpenAI-compatible `base_url`, API key, model, timeout, commit sample size, and yearly batch size.
+- `[email]`: SMTP host, port, TLS/SSL mode, sender, and recipients.
+- `${ENV_VAR}` placeholders are expanded while loading TOML.
 
-Sensitive values should use `${ENV_VAR}` placeholders and be supplied via environment or `.env` file.
+## Engineering notes
+
+- Empty `branch` means all refs (`git log --all`).
+- GitHub App tokens use HTTPS authentication; a local mirror is reused when available.
+- AI failures degrade to a rule-based summary and are recorded as a warning in the report workflow.
+- Yearly reports call AI once per project batch and then once for the global synthesis.
+- Keep historical investigation notes under `docs/archive/` and one-off scripts under `tools/archive/`; do not add dated process reports to the repository root.

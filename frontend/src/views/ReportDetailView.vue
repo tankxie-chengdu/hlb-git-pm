@@ -155,7 +155,7 @@
               <div v-if="promptSources(selectedStep).length" class="source-overview source-overview-secondary">
                 <div class="source-overview-item">
                   <span>用户提示词</span>
-                  <strong>{{ formatCount(selectedStep.input_summary.prompt_characters) }} 字符</strong>
+                  <strong>{{ formatCount(promptCharacters(selectedStep)) }} 字符</strong>
                 </div>
                 <div class="source-overview-item source-overview-wide">
                   <span>数据处理口径</span>
@@ -270,6 +270,37 @@
                   <el-table-column prop="confidence" label="置信度" width="72" align="center" />
                 </el-table>
               </div>
+              <div v-if="analysisStages(selectedStep)" class="analysis-stages-block">
+                <h5>年报分阶段分析过程</h5>
+                <div class="analysis-stage-overview">
+                  <div><span>分析策略</span><strong>项目分批 + 全局汇总</strong></div>
+                  <div><span>项目批次</span><strong>{{ analysisStages(selectedStep).batch_count || 0 }} 批</strong></div>
+                  <div><span>批次大小</span><strong>{{ analysisStages(selectedStep).batch_size || 0 }} 个项目</strong></div>
+                  <div><span>最终汇总</span><strong>{{ analysisStages(selectedStep).synthesis?.status === 'success' ? '成功' : '降级' }}</strong></div>
+                </div>
+                <el-table :data="analysisStages(selectedStep).batches || []" size="small" border max-height="320">
+                  <el-table-column prop="batch_number" label="批次" width="64" align="right" />
+                  <el-table-column label="项目" min-width="240">
+                    <template #default="{ row }">{{ (row.project_names || []).join('、') }}</template>
+                  </el-table-column>
+                  <el-table-column prop="selected_commit_count" label="提交样本" width="88" align="right" />
+                  <el-table-column prop="prompt_characters" label="提示词字符" width="104" align="right" />
+                  <el-table-column prop="duration_ms" label="耗时" width="88" align="right">
+                    <template #default="{ row }">{{ formatDuration(row.duration_ms) }}</template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="82">
+                    <template #default="{ row }"><el-tag :type="row.status === 'success' ? 'success' : 'warning'" size="small">{{ row.status === 'success' ? '成功' : '降级' }}</el-tag></template>
+                  </el-table-column>
+                  <el-table-column prop="error" label="错误" min-width="180" show-overflow-tooltip />
+                </el-table>
+                <el-alert
+                  v-if="analysisStages(selectedStep).synthesis?.error"
+                  :title="`全局汇总降级：${analysisStages(selectedStep).synthesis.error}`"
+                  type="warning"
+                  :closable="false"
+                  class="analysis-stage-alert"
+                />
+              </div>
               <div class="prompt-part">
                 <div class="prompt-label">System · 系统提示词</div>
                 <pre>{{ aiSystemPrompt(selectedStep) }}</pre>
@@ -372,13 +403,18 @@ function topContributors(step) {
   return Array.isArray(step?.output_summary?.top_contributors) ? step.output_summary.top_contributors : []
 }
 function aiSystemPrompt(step) { return step?.input_summary?.system_prompt || '' }
-function aiPrompt(step) { return step?.input_summary?.user_prompt || '' }
+function aiPrompt(step) { return step?.output_summary?.analysis_stages?.synthesis_prompt || step?.input_summary?.user_prompt || '' }
 function aiPromptHint(step) {
+  if (step?.output_summary?.analysis_stages) return '年报先按项目批次调用模型，再将批次结果发送给模型生成以下全局汇总提示词；各批次输入和输出可在下方分阶段明细中查看。'
   return step?.input_summary?.enabled
     ? '以下内容就是本次请求发送给模型的提示词。系统提示词和用户提示词分别对应 API 请求中的两个 message。'
     : '以下内容是按当前报告数据生成的提示词预览；AI 未启用或缺少 API Key 时不会发送请求。'
 }
-function promptSources(step) { return Array.isArray(step?.input_summary?.prompt_sources) ? step.input_summary.prompt_sources : [] }
+function promptSources(step) {
+  if (Array.isArray(step?.output_summary?.prompt_sources)) return step.output_summary.prompt_sources
+  return Array.isArray(step?.input_summary?.prompt_sources) ? step.input_summary.prompt_sources : []
+}
+function promptCharacters(step) { return step?.output_summary?.analysis_stages?.synthesis?.prompt_characters || step?.input_summary?.prompt_characters || 0 }
 function promptSource(step, key) { return promptSources(step).find(source => source.key === key) || {} }
 function promptSourceRecords(step, key, field = 'records') { return promptSource(step, key)[field] || 0 }
 function formatCount(value) { return Number(value || 0).toLocaleString('zh-CN') }
@@ -394,6 +430,7 @@ function sourceProjects(source) { return Array.isArray(sourceDetails(source).pro
 function sourcePeople(source) { return Array.isArray(sourceDetails(source).people) ? sourceDetails(source).people : [] }
 function sourceTrend(source) { return Array.isArray(sourceDetails(source).trend) ? sourceDetails(source).trend : [] }
 function projectAnalyses(step) { return Array.isArray(step?.output_summary?.project_analyses) ? step.output_summary.project_analyses : [] }
+function analysisStages(step) { return step?.step_key === 'ai_analysis' && step?.output_summary?.analysis_stages ? step.output_summary.analysis_stages : null }
 function qualityTag(level) { return { '稳定': 'success', '需关注': 'warning', '证据不足': 'info' }[level] || 'info' }
 function sourceMetricEntries(source) {
   const details = sourceDetails(source)
@@ -527,6 +564,14 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 .source-table-block, .source-detail-block { margin-top: 14px; }
 .source-table-block h5, .source-detail-block h5 { margin: 0 0 8px; color: #7c4a03; font-size: 12px; }
 .source-table-block :deep(.el-table), .source-detail-block :deep(.el-table) { width: 100%; }
+.analysis-stages-block { margin-top: 18px; padding-top: 14px; border-top: 1px solid #ead7b0; }
+.analysis-stages-block h5 { margin: 0 0 8px; color: #7c4a03; font-size: 12px; }
+.analysis-stage-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #ead7b0; background: #fff; margin-bottom: 12px; }
+.analysis-stage-overview div { padding: 9px 10px; border-right: 1px solid #ead7b0; }
+.analysis-stage-overview div:last-child { border-right: 0; }
+.analysis-stage-overview span { display: block; color: #8a6d3b; font-size: 11px; margin-bottom: 4px; }
+.analysis-stage-overview strong { color: #7c4a03; font-size: 13px; }
+.analysis-stage-alert { margin-top: 12px; }
 .source-table-block :deep(.el-progress__text) { font-size: 11px !important; min-width: 34px; }
 .source-facts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid #ead7b0; background: #fff; }
 .source-fact { padding: 8px 10px; border-right: 1px solid #ead7b0; border-bottom: 1px solid #ead7b0; }
@@ -542,6 +587,7 @@ onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 @media (max-width: 1000px) {
   .overview-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analysis-stage-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .source-overview-item:nth-child(2) { border-right: 0; }
   .source-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .overview-item { border-bottom: 1px solid #ebeef5; }

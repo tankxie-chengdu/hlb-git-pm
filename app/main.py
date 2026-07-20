@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .ai import SYSTEM_PROMPT, analyze, build_context, build_prompt, context_commit_count, context_source_summary, parse_analysis_response
+from .ai import SYSTEM_PROMPT, analyze, analyze_yearly, build_context, build_prompt, context_commit_count, context_source_summary, parse_analysis_response
 from .chart import render_trend_chart
 from .config import AppConfig, load_config
 from .emailer import send_email
@@ -309,7 +309,17 @@ def run_once(
                 "model": config.ai.model,
                 "thinking_enabled": config.ai.thinking_enabled,
                 "max_commits": config.ai.max_commits,
-                "process": "将宏观指标、趋势、仓库摘要和最多 max_commits 条提交明细组装为提示词，调用配置的 AI 模型。",
+                "analysis_strategy": "yearly_project_batches" if report_type == "yearly" else "single_request",
+                "yearly_project_batch_size": config.ai.yearly_project_batch_size if report_type == "yearly" else None,
+                "yearly_project_batch_count": (
+                    (len(report.project_contributions) + config.ai.yearly_project_batch_size - 1) // config.ai.yearly_project_batch_size
+                    if report_type == "yearly" else 0
+                ),
+                "process": (
+                    "年报先按项目批次分析，再基于批次结果生成全局汇总。"
+                    if report_type == "yearly"
+                    else "将宏观指标、趋势、仓库摘要和最多 max_commits 条提交明细组装为提示词，调用配置的 AI 模型。"
+                ),
                 "report_commits": report.total_commits,
                 "context_commits": ai_context_commits,
                 "omitted_commits": max(0, report.total_commits - ai_context_commits),
@@ -322,7 +332,19 @@ def run_once(
             },
         )
     try:
-        raw_ai_analysis = analyze(report, config.ai, prompt=ai_prompt)
+        yearly_stages = None
+        if report_type == "yearly" and isinstance(report, PeriodReport):
+            yearly_stages = analyze_yearly(
+                report,
+                config.ai,
+                progress_callback=(
+                    (lambda output: workflow.progress("ai_analysis", output))
+                    if workflow else None
+                ),
+            )
+            raw_ai_analysis = yearly_stages["raw_response"]
+        else:
+            raw_ai_analysis = analyze(report, config.ai, prompt=ai_prompt)
         report.ai_analysis, report.project_analyses, structured_ai = parse_analysis_response(raw_ai_analysis, report)
     except Exception as error:
         if workflow:
@@ -334,11 +356,16 @@ def run_once(
         or "AI 分析调用失败" in report.ai_analysis
         or "本地规则摘要" in report.ai_analysis
         or not structured_ai
+        or bool(yearly_stages and yearly_stages.get("degraded"))
     )
     if workflow:
         context_commits = ai_context_commits
         ai_output = {
-            "process": "AI 返回全局 Markdown 和逐项目结构化分析后进行校验；缺失项目使用证据不足降级项。",
+            "process": (
+                "年报已完成项目分批分析和全局汇总，并校验逐项目结构化结果。"
+                if yearly_stages
+                else "AI 返回全局 Markdown 和逐项目结构化分析后进行校验；缺失项目使用证据不足降级项。"
+            ),
             "characters": len(report.ai_analysis),
             "degraded": ai_degraded,
             "structured_response": structured_ai,
@@ -350,6 +377,17 @@ def run_once(
             "context_characters": len(ai_context),
             "analysis": report.ai_analysis,
         }
+        if yearly_stages:
+            ai_output["analysis_stages"] = {
+                "strategy": yearly_stages.get("strategy"),
+                "batch_size": yearly_stages.get("batch_size"),
+                "batch_count": yearly_stages.get("batch_count"),
+                "degraded": yearly_stages.get("degraded"),
+                "batches": yearly_stages.get("batches", []),
+                "synthesis": yearly_stages.get("synthesis", {}),
+                "synthesis_prompt": yearly_stages.get("synthesis_prompt", ""),
+            }
+            ai_output["prompt_sources"] = yearly_stages.get("global_prompt_sources", [])
         if ai_degraded:
             workflow.warning("ai_analysis", ai_output)
         else:
