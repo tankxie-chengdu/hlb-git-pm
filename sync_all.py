@@ -21,6 +21,7 @@ import requests
 import time
 import sys
 import logging
+import os
 from datetime import datetime
 from typing import List, Dict, Any
 
@@ -35,10 +36,17 @@ logger = logging.getLogger(__name__)
 class RepositorySyncer:
     """仓库同步客户端"""
 
-    def __init__(self, api_base: str = "http://localhost:8000"):
+    def __init__(self, api_base: str = "http://localhost:8000", token: str = None):
         self.api_base = api_base.rstrip('/')
         self.session = requests.Session()
         self.session.timeout = 10
+
+        # 设置认证 token（如果提供）
+        if token:
+            self.session.headers.update({
+                'Authorization': f'Bearer {token}'
+            })
+            logger.debug(f"✓ 已设置认证 token")
 
     def get_all_repos(self) -> List[Dict[str, Any]]:
         """获取所有仓库列表"""
@@ -186,6 +194,7 @@ def main():
   python sync_all.py                                    # 全量同步
   python sync_all.py --repos WeFi-HLB/ai-ocr           # 同步指定仓库
   python sync_all.py --api http://192.168.1.100:8000   # 连接远程 API
+  python sync_all.py --token YOUR_TOKEN                # 使用认证 token
   python sync_all.py --timeout 7200                    # 2 小时超时
   python sync_all.py --no-wait                         # 触发后不等待
         '''
@@ -195,6 +204,11 @@ def main():
         '--api',
         default='http://localhost:8000',
         help='API 服务器地址 (默认: http://localhost:8000)'
+    )
+    parser.add_argument(
+        '--token',
+        default=None,
+        help='认证 token (可从环境变量 SYNC_TOKEN 读取)'
     )
     parser.add_argument(
         '--repos',
@@ -229,8 +243,11 @@ def main():
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
+    # 获取 token（优先级：命令行 > 环境变量 > None）
+    token = args.token or os.environ.get('SYNC_TOKEN')
+
     # 创建同步客户端
-    syncer = RepositorySyncer(args.api)
+    syncer = RepositorySyncer(args.api, token=token)
 
     print()
     logger.info(f"🔗 连接到: {args.api}")
