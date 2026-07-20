@@ -353,6 +353,10 @@ def _build_repo_list(db: Session) -> list[dict]:
     contributors = db.query(ContributorStat).all()
     members = db.query(Member).all()
 
+    # Debug: log synced_at field for verification
+    logger.debug("构建仓库列表，已克隆仓库同步时间: %s",
+                [(r.full_name, r.synced_at) for r in repos if r.is_cloned])
+
     # Build member lookup
     email_to_member: dict[str, Member] = {m.git_email.lower(): m for m in members if m.git_email}
     name_to_member: dict[str, Member] = {m.git_name: m for m in members if m.git_name}

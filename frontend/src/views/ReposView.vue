@@ -83,12 +83,13 @@
               </div>
               <div style="color: #909399; font-size: 12px; margin-top: 4px">
                 <div>最后推送：{{ repo.pushed_at ? repo.pushed_at.slice(0, 10) : '-' }} &nbsp;·&nbsp; 默认分支：{{ repo.default_branch }}</div>
-                <div v-if="repo.is_cloned" style="margin-top: 4px">
-                  最后同步：<span style="color: #606266">{{ formatSyncTime(repo.synced_at) }}</span>
-                  <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
-                </div>
-                <div v-else>
-                  <span style="color: #c0c4cc; font-style: italic">未同步过</span>
+                <div style="margin-top: 4px">
+                  <span v-if="repo.is_cloned">
+                    最后同步：<span style="color: #606266">{{ formatSyncTime(repo.synced_at) }}</span>
+                  </span>
+                  <span v-else style="color: #c0c4cc; font-style: italic">
+                    未同步过
+                  </span>
                   <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
                 </div>
               </div>
