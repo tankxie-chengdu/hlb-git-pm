@@ -82,9 +82,15 @@
                 {{ repo.description }}
               </div>
               <div style="color: #909399; font-size: 12px; margin-top: 4px">
-                最后推送：{{ repo.pushed_at ? repo.pushed_at.slice(0, 10) : '-' }}
-                &nbsp;·&nbsp; 默认分支：{{ repo.default_branch }}
-                <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
+                <div>最后推送：{{ repo.pushed_at ? repo.pushed_at.slice(0, 10) : '-' }} &nbsp;·&nbsp; 默认分支：{{ repo.default_branch }}</div>
+                <div v-if="repo.is_cloned" style="margin-top: 4px">
+                  最后同步：<span style="color: #606266">{{ formatSyncTime(repo.synced_at) }}</span>
+                  <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
+                </div>
+                <div v-else>
+                  <span style="color: #c0c4cc; font-style: italic">未同步过</span>
+                  <span v-if="repo.stars"> &nbsp;·&nbsp; ★ {{ repo.stars }}</span>
+                </div>
               </div>
             </div>
 
@@ -275,6 +281,28 @@ function statusTagType(s) {
 
 function statusLabel(s) {
   return { queued: '排队', syncing: '同步中', done: '完成', failed: '失败' }[s] || s
+}
+
+function formatSyncTime(isoString) {
+  if (!isoString) return '从未同步'
+  try {
+    const date = new Date(isoString)
+    const now = new Date()
+    const diffMs = now - date
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    const diffDays = Math.floor(diffMs / 86400000)
+
+    if (diffMins < 1) return '刚刚'
+    if (diffMins < 60) return `${diffMins} 分钟前`
+    if (diffHours < 24) return `${diffHours} 小时前`
+    if (diffDays < 7) return `${diffDays} 天前`
+
+    // Show date for older syncs
+    return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return isoString
+  }
 }
 
 async function fetchData() {

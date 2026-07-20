@@ -392,6 +392,7 @@ def _build_repo_list(db: Session) -> list[dict]:
             "is_fork": r.is_fork,
             "clone_url": r.clone_url,
             "is_cloned": r.is_cloned,
+            "synced_at": r.synced_at,  # Last successful sync time
             "is_active": activity["level"] in ("today", "this_week", "this_month"),
             "activity": activity,
             "branch_count": r.branch_count,
