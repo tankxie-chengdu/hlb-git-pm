@@ -72,8 +72,12 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True, env: dict[str, s
     if proxy_config and proxy_config.get("enabled"):
         if proxy_config.get("http_proxy"):
             cmd.extend(["-c", f"http.proxy={proxy_config['http_proxy']}"])
+            logger.debug("使用 HTTP 代理: %s", proxy_config['http_proxy'])
         if proxy_config.get("https_proxy"):
             cmd.extend(["-c", f"https.proxy={proxy_config['https_proxy']}"])
+            logger.debug("使用 HTTPS 代理: %s", proxy_config['https_proxy'])
+    elif proxy_config:
+        logger.debug("代理配置已禁用")
 
     cmd.extend(args)
 

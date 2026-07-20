@@ -580,6 +580,9 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
                 "no_proxy": proxy.no_proxy,
                 "enabled": proxy.enabled,
             }
+            logger.info("代理配置已加载: enabled=%s, http_proxy=%s", proxy.enabled, proxy.http_proxy if proxy.enabled else "N/A")
+        else:
+            logger.info("未找到代理配置")
         db.close()
     except Exception as e:
         logger.warning("获取代理配置失败: %s", e)
@@ -644,6 +647,8 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
                 fetch=True,
                 auth_token=token,
             )
+            # Pass proxy_config explicitly (it's captured from outer scope but be explicit for clarity)
+            logger.info("同步开始: %s, 代理配置: %s", full_name, proxy_config)
             ensure_repository(cfg, workspace, proxy_config=proxy_config)
             local_dir = _repo_local_dir(r["clone_url"], workspace)
             if local_dir:
