@@ -254,17 +254,32 @@ def _update_repo_after_sync(full_name: str, local_dir: Path) -> None:
 
     session = get_session()
     try:
+        # Checkpoint 1: Calculate stats
+        logger.info("[SYNC_UPDATE] 开始更新: %s, local_dir=%s", full_name, local_dir)
+        logger.info("[SYNC_UPDATE] 检查分支...")
         branch_count = _local_repo_stats(local_dir)["branch_count"]
+        logger.info("[SYNC_UPDATE] 分支数: %d", branch_count)
+
+        logger.info("[SYNC_UPDATE] 检查提交...")
         _, total_commits = _local_contributors(local_dir)
+        logger.info("[SYNC_UPDATE] 提交数: %d", total_commits)
+
         now = datetime.now(_tz.utc).isoformat()
 
+        # Checkpoint 2: Query database
+        logger.info("[SYNC_UPDATE] 查询数据库...")
         repo = session.query(Repository).filter(Repository.full_name == full_name).first()
+
         if repo:
+            logger.info("[SYNC_UPDATE] 找到现有记录，更新...")
             repo.is_cloned = True
             repo.branch_count = branch_count
             repo.total_commits = total_commits
             repo.synced_at = now
+            logger.info("[SYNC_UPDATE] 记录已修改: is_cloned=True, branch_count=%d, total_commits=%d",
+                       branch_count, total_commits)
         else:
+            logger.info("[SYNC_UPDATE] 未找到现有记录，创建新记录...")
             org_name = full_name.split("/")[0] if "/" in full_name else ""
             # Try to get clone URL from git config
             try:
@@ -284,10 +299,16 @@ def _update_repo_after_sync(full_name: str, local_dir: Path) -> None:
                 total_commits=total_commits,
                 synced_at=now,
             ))
+            logger.info("[SYNC_UPDATE] 新记录已添加")
+
+        # Checkpoint 3: Commit
+        logger.info("[SYNC_UPDATE] 提交事务...")
         session.commit()
+        logger.info("[SYNC_UPDATE] ✓ 完成: branch_count=%d, total_commits=%d, synced_at=%s",
+                   branch_count, total_commits, now)
     except Exception as e:
         session.rollback()
-        logger.warning("Repository 更新失败 %s: %s", full_name, e)
+        logger.error("[SYNC_UPDATE] ❌ 更新失败: %s", full_name, exc_info=True)
     finally:
         session.close()
 
@@ -597,6 +618,12 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
         local_dir = _repo_local_dir(repo["clone_url"], workspace)
         if local_dir is None or row is None or not row.is_cloned or not row.synced_at:
             return True
+
+        # Force sync if database shows 0 commits/branches (indicates failed _update_repo_after_sync)
+        if row.total_commits == 0 and row.branch_count == 0:
+            logger.warning("强制同步: %s 数据库显示 0 提交/分支，可能同步失败", repo["full_name"])
+            return True
+
         pushed_at = str(repo.get("pushed_at") or row.pushed_at or "")
         if not pushed_at:
             return True
@@ -656,8 +683,11 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
             logger.info("同步开始: %s, 代理配置: %s", full_name, proxy_config)
             local_dir = ensure_repository(cfg, workspace, proxy_config=proxy_config)
             if local_dir:
+                logger.debug("[SYNC_ONE] git clone/fetch 成功: %s -> %s", full_name, local_dir)
                 _persist_contributors(full_name, local_dir)
+                logger.debug("[SYNC_ONE] 贡献者持久化完成: %s", full_name)
                 _update_repo_after_sync(full_name, local_dir)
+                logger.debug("[SYNC_ONE] 仓库信息更新完成: %s", full_name)
             else:
                 logger.warning("ensure_repository 返回空路径: %s", full_name)
 
