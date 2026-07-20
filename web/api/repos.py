@@ -792,6 +792,82 @@ def sync_repos(
     return {"queued": [r["full_name"] for r in repos_to_sync]}
 
 
+@router.get("/{full_name}/recent-commits")
+def get_recent_commits(
+    full_name: str,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    _user: User = Depends(get_current_user),
+):
+    """Get recent commits for a specific repository (最近 N 次提交)."""
+    repo = db.query(Repository).filter(Repository.full_name == full_name).first()
+    if not repo:
+        raise HTTPException(status_code=404, detail=f"Repository {full_name} not found")
+
+    if not repo.is_cloned:
+        raise HTTPException(status_code=400, detail=f"Repository {full_name} not cloned yet")
+
+    # Get local directory for this repository
+    workspace = Path(_app_config.workspace).expanduser().resolve()
+    local_dir = _repo_local_dir(repo.clone_url, workspace)
+    if not local_dir or not local_dir.exists():
+        raise HTTPException(status_code=400, detail=f"Local directory for {full_name} not found")
+
+    # Run git log to get recent commits
+    try:
+        out = subprocess.run(
+            [
+                "git", "log", "--all",
+                "--format=%H%x1f%ae%x1f%an%x1f%aI%x1f%s",
+                f"-{limit}",
+            ],
+            cwd=local_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+
+        if out.returncode != 0:
+            logger.warning("git log 失败 %s: %s", full_name, out.stderr[:200])
+            return {"commits": []}
+
+        commits = []
+        for line in out.stdout.splitlines():
+            parts = line.split("\x1f", 4)
+            if len(parts) != 5:
+                continue
+            sha, email, name, date, subject = parts
+
+            # Extract branch info (简化处理)
+            branch_out = subprocess.run(
+                ["git", "branch", "-r", "--contains", sha.strip()],
+                cwd=local_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            branches = [b.strip() for b in branch_out.stdout.splitlines() if b.strip()]
+
+            commits.append({
+                "sha": sha.strip(),
+                "author_email": email.strip(),
+                "author_name": name.strip(),
+                "date": date.strip(),
+                "subject": subject.strip(),
+                "branches": branches[:3],  # 最多显示 3 个分支
+            })
+
+        return {"commits": commits}
+
+    except subprocess.TimeoutExpired:
+        logger.warning("git log 超时 %s", full_name)
+        return {"commits": []}
+    except Exception as e:
+        logger.warning("获取最近提交失败 %s: %s", full_name, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/sync/status")
 def sync_status(
     db: Session = Depends(get_db),

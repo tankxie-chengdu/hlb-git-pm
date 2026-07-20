@@ -136,33 +136,91 @@
             </el-button>
           </div>
 
-          <!-- 贡献者明细 -->
+          <!-- 详情 Tab 页面 -->
           <el-collapse-transition>
             <div v-if="expanded.has(repo.full_name)" style="margin-top: 12px">
-              <!-- 汇总行 -->
-              <div style="display: flex; gap: 24px; margin-bottom: 10px; font-size: 13px; color: #606266">
-                <span><b>{{ repo.branch_count }}</b> 个分支</span>
-                <span><b>{{ repo.total_commits }}</b> 次提交（全分支去重）</span>
-                <span><b>{{ repo.contributors.length }}</b> 位贡献者</span>
-              </div>
-              <el-table :data="repo.contributors" size="small" stripe>
-                <el-table-column label="姓名 / Git 用户名" min-width="140">
-                  <template #default="{ row }">
-                    <span v-if="row.real_name" style="font-weight: 500">{{ row.real_name }}</span>
-                    <span v-if="row.real_name && row.git_name" style="color: #909399"> ({{ row.git_name }})</span>
-                    <span v-if="!row.real_name">{{ row.git_name || row.git_email }}</span>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="department" label="部门" width="120" />
-                <el-table-column prop="git_email" label="邮箱" min-width="180" />
-                <el-table-column prop="commit_count" label="提交数" width="90" align="right">
-                  <template #default="{ row }">
-                    <el-tag type="primary" size="small">{{ row.commit_count }}</el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column prop="first_commit_at" label="首次提交" width="110" />
-                <el-table-column prop="last_commit_at" label="最近提交" width="110" />
-              </el-table>
+              <el-tabs type="border-card">
+                <!-- Tab 1: 贡献者 -->
+                <el-tab-pane label="贡献者">
+                  <!-- 汇总行 -->
+                  <div style="display: flex; gap: 24px; margin-bottom: 10px; font-size: 13px; color: #606266">
+                    <span><b>{{ repo.branch_count }}</b> 个分支</span>
+                    <span><b>{{ repo.total_commits }}</b> 次提交（全分支去重）</span>
+                    <span><b>{{ repo.contributors.length }}</b> 位贡献者</span>
+                  </div>
+                  <el-table :data="repo.contributors" size="small" stripe>
+                    <el-table-column label="姓名 / Git 用户名" min-width="140">
+                      <template #default="{ row }">
+                        <span v-if="row.real_name" style="font-weight: 500">{{ row.real_name }}</span>
+                        <span v-if="row.real_name && row.git_name" style="color: #909399"> ({{ row.git_name }})</span>
+                        <span v-if="!row.real_name">{{ row.git_name || row.git_email }}</span>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="department" label="部门" width="120" />
+                    <el-table-column prop="git_email" label="邮箱" min-width="180" />
+                    <el-table-column prop="commit_count" label="提交数" width="90" align="right">
+                      <template #default="{ row }">
+                        <el-tag type="primary" size="small">{{ row.commit_count }}</el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="first_commit_at" label="首次提交" width="110" />
+                    <el-table-column prop="last_commit_at" label="最近提交" width="110" />
+                  </el-table>
+                </el-tab-pane>
+
+                <!-- Tab 2: 最近提交 -->
+                <el-tab-pane label="最近提交" lazy>
+                  <div style="padding: 12px 0">
+                    <div v-if="recentCommitsLoading[repo.full_name]" v-loading="true" style="height: 200px" />
+                    <div v-else-if="!recentCommits[repo.full_name] || recentCommits[repo.full_name].length === 0">
+                      <el-empty description="暂无提交数据" />
+                    </div>
+                    <div v-else>
+                      <div
+                        v-for="(commit, idx) in recentCommits[repo.full_name]"
+                        :key="commit.sha"
+                        style="
+                          padding: 12px;
+                          border-bottom: 1px solid #ebeef5;
+                          display: flex;
+                          gap: 12px;
+                        "
+                      >
+                        <!-- 提交号和分支 -->
+                        <div style="min-width: 120px">
+                          <div style="font-family: monospace; font-size: 12px; color: #606266; word-break: break-all">
+                            {{ commit.sha.substring(0, 8) }}
+                          </div>
+                          <div v-if="commit.branches.length" style="margin-top: 4px">
+                            <el-tag
+                              v-for="branch in commit.branches"
+                              :key="branch"
+                              type="info"
+                              size="small"
+                              style="margin-right: 4px"
+                            >
+                              {{ branch.replace('origin/', '').replace('remotes/', '') }}
+                            </el-tag>
+                          </div>
+                        </div>
+
+                        <!-- 提交信息 -->
+                        <div style="flex: 1; min-width: 0">
+                          <div style="font-weight: 500; margin-bottom: 4px; word-break: break-word">
+                            {{ commit.subject }}
+                          </div>
+                          <div style="font-size: 12px; color: #909399">
+                            {{ commit.author_name }} &lt;{{ commit.author_email }}&gt;
+                          </div>
+                          <div style="font-size: 12px; color: #c0c4cc; margin-top: 4px">
+                            {{ formatCommitDate(commit.date) }}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
             </div>
           </el-collapse-transition>
         </el-card>
@@ -186,6 +244,8 @@ const search = ref('')
 const expanded = ref(new Set())
 const syncJobs = ref({})
 const syncingAll = ref(false)
+const recentCommits = ref({})  // 存储最近提交
+const recentCommitsLoading = ref({})  // 加载状态
 let pollTimer = null
 
 const filtered = computed(() => {
@@ -250,8 +310,30 @@ const allDone = computed(() => {
 const hasUnsynced = computed(() => repos.value.some(r => !r.is_cloned))
 
 function toggle(name) {
-  if (expanded.value.has(name)) expanded.value.delete(name)
-  else expanded.value.add(name)
+  if (expanded.value.has(name)) {
+    expanded.value.delete(name)
+  } else {
+    expanded.value.add(name)
+    // 展开时自动加载最近提交（如果还没有加载过）
+    if (!recentCommits.value[name]) {
+      loadRecentCommits(name)
+    }
+  }
+}
+
+async function loadRecentCommits(repoFullName) {
+  if (recentCommitsLoading.value[repoFullName]) return
+
+  recentCommitsLoading.value[repoFullName] = true
+  try {
+    const { data } = await client.get(`/repos/${repoFullName}/recent-commits?limit=10`)
+    recentCommits.value[repoFullName] = data.commits
+  } catch (e) {
+    ElMessage.error(`获取最近提交失败: ${e.response?.data?.detail || e.message}`)
+    recentCommits.value[repoFullName] = []
+  } finally {
+    recentCommitsLoading.value[repoFullName] = false
+  }
 }
 
 function isSyncing(name) {
@@ -301,6 +383,29 @@ function formatSyncTime(isoString) {
 
     // Show date for older syncs
     return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  } catch {
+    return isoString
+  }
+}
+
+function formatCommitDate(isoString) {
+  if (!isoString) return '-'
+  try {
+    const date = new Date(isoString)
+    const now = new Date()
+    const diffMs = now - date
+    const diffMins = Math.floor(diffMs / 60000)
+    const diffHours = Math.floor(diffMs / 3600000)
+    const diffDays = Math.floor(diffMs / 86400000)
+
+    if (diffMins < 1) return '刚刚'
+    if (diffMins < 60) return `${diffMins} 分钟前`
+    if (diffHours < 24) return `${diffHours} 小时前`
+    if (diffDays < 7) return `${diffDays} 天前`
+    if (diffDays < 30) return `${diffDays} 天前`
+
+    // Show date for older commits
+    return date.toLocaleDateString('zh-CN', { year: '2-digit', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
   } catch {
     return isoString
   }
