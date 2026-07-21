@@ -62,6 +62,12 @@ def _ensure_compat_columns() -> None:
             connection.execute(text("ALTER TABLE report_history ADD COLUMN email_recipients_json TEXT NOT NULL DEFAULT '[]'"))
         logger.info("已补充 report_history.email_recipients_json 列")
 
+    sync_columns = {column["name"] for column in inspector.get_columns("sync_jobs")}
+    if "details_json" not in sync_columns:
+        with _engine.begin() as connection:
+            connection.execute(text("ALTER TABLE sync_jobs ADD COLUMN details_json TEXT NOT NULL DEFAULT '{}'"))
+        logger.info("已补充 sync_jobs.details_json 列")
+
     member_columns = {column["name"] for column in inspector.get_columns("members")}
     if "is_outsourced" not in member_columns:
         with _engine.begin() as connection:

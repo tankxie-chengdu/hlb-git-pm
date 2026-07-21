@@ -3,8 +3,10 @@ from __future__ import annotations
 import logging
 import re
 import os
+import shlex
 import subprocess
 import tempfile
+import time as time_module
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, tzinfo
 from pathlib import Path
@@ -15,6 +17,18 @@ from .models import Commit, RepositoryReport
 
 
 logger = logging.getLogger("git_daily_report.git")
+
+
+def _redact_command(command: str) -> str:
+    """Hide credentials that may be embedded in proxy URLs."""
+    return re.sub(r"(https?://[^\s:/@]+):[^\s/@]+@", r"\1:***@", command)
+
+
+def _truncate_output(value: str, limit: int = 4000) -> str:
+    value = (value or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "\n...[输出已截断]..."
 
 
 class GitError(RuntimeError):
@@ -56,7 +70,15 @@ def _git_auth_env(token: str | None):
                 pass
 
 
-def _run_git(args: list[str], cwd: Path, *, check: bool = True, env: dict[str, str] | None = None, proxy_config: dict[str, str] | None = None) -> str:
+def _run_git(
+    args: list[str],
+    cwd: Path,
+    *,
+    check: bool = True,
+    env: dict[str, str] | None = None,
+    proxy_config: dict[str, str] | None = None,
+    command_log: list[dict] | None = None,
+) -> str:
     """Run a git command with optional proxy configuration.
 
     Args:
@@ -90,9 +112,41 @@ def _run_git(args: list[str], cwd: Path, *, check: bool = True, env: dict[str, s
 
     cmd.extend(args)
 
-    process = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", check=False, env=env
-    )
+    command_entry = None
+    if command_log is not None:
+        command_entry = {
+            "command": _redact_command(shlex.join(cmd)),
+            "cwd": str(cwd),
+            "status": "running",
+            "started_at": time_module.time(),
+        }
+        command_log.append(command_entry)
+
+    started = time_module.monotonic()
+    try:
+        process = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", check=False, env=env
+        )
+    except Exception as error:
+        if command_entry is not None:
+            command_entry.update(
+                {
+                    "status": "failed",
+                    "duration_ms": int((time_module.monotonic() - started) * 1000),
+                    "error": str(error),
+                }
+            )
+        raise
+    if command_entry is not None:
+        command_entry.update(
+            {
+                "status": "success" if process.returncode == 0 else "failed",
+                "returncode": process.returncode,
+                "duration_ms": int((time_module.monotonic() - started) * 1000),
+                "stdout": _truncate_output(process.stdout),
+                "stderr": _truncate_output(process.stderr),
+            }
+        )
     if check and process.returncode:
         detail = process.stderr.strip() or process.stdout.strip()
         raise GitError(f"git {' '.join(args)} 失败: {detail}")
@@ -156,18 +210,25 @@ def _https_to_ssh(https_url: str) -> str:
     return https_url
 
 
-def ensure_repository(config: RepositoryConfig, workspace: Path, *, allow_clone: bool = True, proxy_config: dict[str, str] | None = None) -> Path:
+def ensure_repository(
+    config: RepositoryConfig,
+    workspace: Path,
+    *,
+    allow_clone: bool = True,
+    proxy_config: dict[str, str] | None = None,
+    command_log: list[dict] | None = None,
+) -> Path:
     target = _repo_dir(config, workspace)
     remote_url = _https_url_for_token(config.url or "", config.auth_token)
     if (target / ".git").exists() or (target / "HEAD").exists():
         if remote_url:
-            current_url = _run_git(["remote", "get-url", "origin"], target, check=False, proxy_config=proxy_config).strip()
+            current_url = _run_git(["remote", "get-url", "origin"], target, check=False, proxy_config=proxy_config, command_log=command_log).strip()
             if current_url and current_url != remote_url:
-                _run_git(["remote", "set-url", "origin", remote_url], target, proxy_config=proxy_config)
+                _run_git(["remote", "set-url", "origin", remote_url], target, proxy_config=proxy_config, command_log=command_log)
         if config.fetch:
             logger.info("正在获取仓库 %s (%s)", config.name, target)
             with _git_auth_env(config.auth_token) as env:
-                _run_git(["fetch", "--all", "--prune"], target, env=env, proxy_config=proxy_config)
+                _run_git(["fetch", "--all", "--prune"], target, env=env, proxy_config=proxy_config, command_log=command_log)
         return target
     if not config.url:
         raise GitError(f"仓库 {config.name} 不存在: {target}")
@@ -183,7 +244,7 @@ def ensure_repository(config: RepositoryConfig, workspace: Path, *, allow_clone:
         # HTTPS URL exists, try SSH first
         logger.info("正在克隆仓库 %s -> %s (SSH 优先)", config.url, target)
         try:
-            _run_git(["clone", "--mirror", ssh_url, str(target)], workspace, proxy_config=proxy_config)
+            _run_git(["clone", "--mirror", ssh_url, str(target)], workspace, proxy_config=proxy_config, command_log=command_log)
             return target
         except GitError as e:
             logger.warning("SSH 克隆失败，降级到 HTTPS: %s", e)
@@ -192,7 +253,7 @@ def ensure_repository(config: RepositoryConfig, workspace: Path, *, allow_clone:
     # SSH failed or not applicable, use HTTPS with token
     logger.info("正在克隆仓库 %s -> %s (HTTPS)", config.url, target)
     with _git_auth_env(config.auth_token) as env:
-        _run_git(["clone", "--mirror", clone_url, str(target)], workspace, env=env, proxy_config=proxy_config)
+        _run_git(["clone", "--mirror", clone_url, str(target)], workspace, env=env, proxy_config=proxy_config, command_log=command_log)
     return target
 
 

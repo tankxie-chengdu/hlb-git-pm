@@ -7,7 +7,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.config import RepositoryConfig
-from app.git_service import ensure_repository, scan_repository
+from app.git_service import GitError, _run_git, ensure_repository, scan_repository
 
 
 class GitServiceTests(unittest.TestCase):
@@ -68,3 +68,26 @@ class GitServiceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "尚未同步本地 mirror"):
                 ensure_repository(config, workspace, allow_clone=False)
             self.assertFalse((workspace / "org" / "missing").exists())
+
+    def test_run_git_records_command_and_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            self._git(repo, "init", "-b", "main")
+
+            command_log = []
+            output = _run_git(["status", "--short"], repo, command_log=command_log)
+
+            self.assertEqual(output, "")
+            self.assertEqual(len(command_log), 1)
+            self.assertEqual(command_log[0]["status"], "success")
+            self.assertEqual(command_log[0]["returncode"], 0)
+            self.assertIn("git", command_log[0]["command"])
+            self.assertIn("status", command_log[0]["command"])
+            self.assertEqual(command_log[0]["cwd"], str(repo))
+            self.assertIsInstance(command_log[0]["duration_ms"], int)
+
+            with self.assertRaises(GitError):
+                _run_git(["rev-parse", "--verify", "missing-ref"], repo, command_log=command_log)
+            self.assertEqual(command_log[-1]["status"], "failed")
+            self.assertNotEqual(command_log[-1]["returncode"], 0)

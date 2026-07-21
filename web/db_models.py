@@ -173,6 +173,7 @@ class SyncJob(Base):
     error = Column(String, nullable=False, default="")
     started_at = Column(String, nullable=False, default="")
     finished_at = Column(String, nullable=False, default="")
+    details_json = Column(Text, nullable=False, default="{}")
 
 
 class ProxyConfig(Base):

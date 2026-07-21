@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import threading
@@ -7,7 +8,7 @@ import time
 from datetime import datetime, timedelta, timezone as _tz
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from ..db_models import ContributorStat, Member, Repository, SyncJob, User
@@ -244,7 +245,7 @@ def _seed_repos_from_local(db: Session) -> None:
         logger.info("从本地 clone 初始化 repositories 表: %d 个仓库", count)
 
 
-def _update_repo_after_sync(full_name: str, local_dir: Path) -> None:
+def _update_repo_after_sync(full_name: str, local_dir: Path) -> bool:
     """Update Repository row after a successful git sync.
 
     Updates is_cloned, branch_count, total_commits, synced_at.
@@ -306,9 +307,11 @@ def _update_repo_after_sync(full_name: str, local_dir: Path) -> None:
         session.commit()
         logger.info("[SYNC_UPDATE] ✓ 完成: branch_count=%d, total_commits=%d, synced_at=%s",
                    branch_count, total_commits, now)
+        return True
     except Exception as e:
         session.rollback()
         logger.error("[SYNC_UPDATE] ❌ 更新失败: %s", full_name, exc_info=True)
+        return False
     finally:
         session.close()
 
@@ -574,7 +577,7 @@ def _persist_contributors(full_name: str, local_dir: Path) -> None:
         session.close()
 
 
-def _do_sync(repos_to_sync: list[dict]) -> None:
+def _do_sync(repos_to_sync: list[dict], *, force: bool = False, sequential: bool = False) -> None:
     """Clone or fetch repos concurrently using a thread pool."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from app.github_app import create_installation_token
@@ -642,31 +645,69 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
     def _sync_one(r: dict) -> None:
         full_name = r["full_name"]
         session = get_session()
+        details = {
+            "force": force,
+            "sequential": sequential,
+            "commands": [],
+            "events": [],
+        }
+
+        def add_event(stage: str, event_status: str, message: str, **extra) -> None:
+            details["events"].append(
+                {
+                    "stage": stage,
+                    "status": event_status,
+                    "message": message,
+                    "at": datetime.now(_tz.utc).isoformat(),
+                    **extra,
+                }
+            )
+
         try:
             # Update DB: mark as syncing
             with _sync_lock:
-                _sync_jobs[full_name]["status"] = "syncing"
+                _sync_jobs[full_name] = {
+                    "status": "syncing",
+                    "error": None,
+                    "started_at": time.time(),
+                    "details": details,
+                }
 
             job = session.query(SyncJob).filter(SyncJob.repo_name == full_name).first()
+            started_at = datetime.now(_tz.utc).isoformat()
             if job:
                 job.status = "syncing"
+                job.error = ""
+                job.started_at = started_at
             else:
-                job = SyncJob(repo_name=full_name, status="syncing", started_at=datetime.now(_tz.utc).isoformat())
+                job = SyncJob(repo_name=full_name, status="syncing", started_at=started_at)
                 session.add(job)
+            job.details_json = json.dumps(details, ensure_ascii=False, default=str)
             session.commit()
 
+            add_event("prepare", "success", "已开始处理仓库", repository=full_name)
+            if gh_cfg:
+                add_event(
+                    "github_token",
+                    "success" if token else "failed",
+                    "GitHub App installation token 已获取" if token else "GitHub App installation token 获取失败，后续 Git 操作可能失败",
+                )
             repo_row = session.query(Repository).filter(Repository.full_name == full_name).first()
-            should_sync = _needs_sync(repo_row, r)
+            should_sync = force or _needs_sync(repo_row, r)
             if not should_sync:
+                details["cached"] = True
+                add_event("cache", "skipped", "命中 pushed_at 缓存，跳过 fetch")
                 with _sync_lock:
                     _sync_jobs[full_name] = {
                         "status": "done",
                         "error": None,
                         "cached": True,
                         "finished_at": time.time(),
+                        "details": details,
                     }
                 job.status = "done"
                 job.error = ""
+                job.details_json = json.dumps(details, ensure_ascii=False, default=str)
                 job.finished_at = datetime.now(_tz.utc).isoformat()
                 session.commit()
                 logger.info("同步命中缓存，跳过 fetch: %s", full_name)
@@ -681,15 +722,38 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
             )
             # Pass proxy_config explicitly (it's captured from outer scope but be explicit for clarity)
             logger.info("同步开始: %s, 代理配置: %s", full_name, proxy_config)
-            local_dir = ensure_repository(cfg, workspace, proxy_config=proxy_config)
+            add_event("git", "running", "开始执行 Git clone/fetch", force=force)
+            local_dir = ensure_repository(
+                cfg,
+                workspace,
+                proxy_config=proxy_config,
+                command_log=details["commands"],
+            )
             if local_dir:
                 logger.debug("[SYNC_ONE] git clone/fetch 成功: %s -> %s", full_name, local_dir)
+                add_event("git", "success", "Git clone/fetch 执行完成", local_dir=str(local_dir))
                 _persist_contributors(full_name, local_dir)
                 logger.debug("[SYNC_ONE] 贡献者持久化完成: %s", full_name)
-                _update_repo_after_sync(full_name, local_dir)
+                add_event("contributors", "success", "贡献者统计已更新")
+                stats_updated = _update_repo_after_sync(full_name, local_dir)
                 logger.debug("[SYNC_ONE] 仓库信息更新完成: %s", full_name)
+                session.expire_all()
+                refreshed = session.query(Repository).filter(Repository.full_name == full_name).first()
+                details["result"] = {
+                    "is_cloned": bool(refreshed and refreshed.is_cloned),
+                    "branch_count": int(refreshed.branch_count) if refreshed else 0,
+                    "total_commits": int(refreshed.total_commits) if refreshed else 0,
+                    "synced_at": refreshed.synced_at if refreshed else "",
+                }
+                add_event(
+                    "stats",
+                    "success" if stats_updated else "failed",
+                    "仓库分支、提交和同步时间已更新" if stats_updated else "Git 已完成，但仓库统计写入失败",
+                    **details["result"],
+                )
             else:
                 logger.warning("ensure_repository 返回空路径: %s", full_name)
+                add_event("git", "failed", "Git 操作没有返回本地仓库路径")
 
             # Update DB: mark as done
             with _sync_lock:
@@ -697,12 +761,14 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
                     "status": "done",
                     "error": None,
                     "finished_at": time.time(),
+                    "details": details,
                 }
 
             job = session.query(SyncJob).filter(SyncJob.repo_name == full_name).first()
             if job:
                 job.status = "done"
                 job.error = ""
+                job.details_json = json.dumps(details, ensure_ascii=False, default=str)
                 job.finished_at = datetime.now(_tz.utc).isoformat()
             session.commit()
             logger.info("同步完成: %s", full_name)
@@ -713,17 +779,26 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
                     "status": "failed",
                     "error": error_msg,
                     "finished_at": time.time(),
+                    "details": details,
                 }
+            add_event("sync", "failed", error_msg)
 
             job = session.query(SyncJob).filter(SyncJob.repo_name == full_name).first()
             if job:
                 job.status = "failed"
                 job.error = error_msg
+                job.details_json = json.dumps(details, ensure_ascii=False, default=str)
                 job.finished_at = datetime.now(_tz.utc).isoformat()
             session.commit()
             logger.warning("同步失败: %s — %s", full_name, e)
         finally:
             session.close()
+
+    if sequential:
+        logger.info("按串行模式同步 %d 个仓库，force=%s", len(repos_to_sync), force)
+        for repo in repos_to_sync:
+            _sync_one(repo)
+        return
 
     max_workers = min(8, len(repos_to_sync))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -738,6 +813,8 @@ def _do_sync(repos_to_sync: list[dict]) -> None:
 @router.post("/sync")
 def sync_repos(
     full_names: list[str] = Body(..., description="要同步的仓库 full_name 列表，空列表表示全量"),
+    force: bool = Query(False, description="强制执行 fetch，跳过 pushed_at 缓存判断"),
+    sequential: bool = Query(False, description="按仓库串行执行，同一批次失败后继续下一个"),
     db: Session = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
@@ -759,7 +836,7 @@ def sync_repos(
             })
     else:
         # Full sync: read from DB first
-        db_repos = db.query(Repository).all()
+        db_repos = db.query(Repository).filter(Repository.is_deleted == False).all()
         if db_repos:
             repos_to_sync = [
                 {"full_name": r.full_name, "clone_url": r.clone_url, "pushed_at": r.pushed_at, "synced_at": r.synced_at, "is_cloned": r.is_cloned}
@@ -780,16 +857,37 @@ def sync_repos(
     if not repos_to_sync:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="没有可同步的仓库")
 
-    # Mark all as queued
+    # Prevent the same repository from entering multiple sync threads. This is
+    # intentionally process-local because the application runs one scheduler
+    # and one API process; a multi-replica deployment needs a distributed lock.
+    skipped: list[str] = []
     with _sync_lock:
-        for r in repos_to_sync:
-            if _sync_jobs.get(r["full_name"], {}).get("status") != "syncing":
-                _sync_jobs[r["full_name"]] = {"status": "queued", "error": None, "started_at": time.time()}
+        pending: list[dict] = []
+        for repo in repos_to_sync:
+            current_status = _sync_jobs.get(repo["full_name"], {}).get("status")
+            if current_status in {"queued", "syncing"}:
+                skipped.append(repo["full_name"])
+                continue
+            _sync_jobs[repo["full_name"]] = {"status": "queued", "error": None, "started_at": time.time()}
+            pending.append(repo)
 
-    thread = threading.Thread(target=_do_sync, args=(repos_to_sync,), daemon=True)
+    if not pending:
+        return {"queued": [], "skipped": skipped, "force": force, "sequential": sequential}
+
+    thread = threading.Thread(
+        target=_do_sync,
+        args=(pending,),
+        kwargs={"force": force, "sequential": sequential},
+        daemon=True,
+    )
     thread.start()
 
-    return {"queued": [r["full_name"] for r in repos_to_sync]}
+    return {
+        "queued": [r["full_name"] for r in pending],
+        "skipped": skipped,
+        "force": force,
+        "sequential": sequential,
+    }
 
 
 @router.get("/{full_name}/recent-commits")
@@ -876,21 +974,26 @@ def sync_status(
     """Return current sync job states from both memory and database."""
     result = {}
 
-    # Get from memory (in-progress jobs)
-    with _sync_lock:
-        result.update(_sync_jobs)
-
-    # Get from database (persisted jobs)
+    # Get from database (persisted jobs) first. In-memory state is newer while
+    # a request is queued/running and is merged below.
     jobs = db.query(SyncJob).all()
     for job in jobs:
+        try:
+            details = json.loads(job.details_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            details = {}
         result[job.repo_name] = {
             "status": job.status,
             "error": job.error,
             "started_at": job.started_at,
             "finished_at": job.finished_at,
+            "details": details,
         }
         if _sync_jobs.get(job.repo_name, {}).get("cached"):
             result[job.repo_name]["cached"] = True
+
+    with _sync_lock:
+        result.update(_sync_jobs)
 
     return result
 

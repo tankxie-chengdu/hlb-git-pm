@@ -10,14 +10,14 @@
       />
       <div style="flex: 1" />
       <span style="color: #909399; font-size: 13px">{{ filtered.length }} 个仓库</span>
-      <el-button :loading="refreshing" @click="refreshFromGitHub">刷新列表</el-button>
+      <el-button :loading="refreshing" :disabled="syncingAll || hasActiveSync" @click="refreshFromGitHub">刷新列表</el-button>
       <el-button
         type="primary"
         :loading="syncingAll"
-        :disabled="syncingAll"
+        :disabled="syncingAll || hasActiveSync"
         @click="syncAll"
       >
-        {{ syncingAll ? '同步中...' : hasUnsynced ? '同步未同步仓库' : '全量更新' }}
+        {{ syncingAll ? '串行更新中...' : '强制全量更新' }}
       </el-button>
     </div>
 
@@ -30,19 +30,45 @@
           <el-button link size="small" @click="syncJobs = {}" style="margin-left: auto">清除</el-button>
         </div>
       </template>
-      <div style="max-height: 200px; overflow-y: auto">
-        <div
-          v-for="(job, name) in syncJobs"
-          :key="name"
-          style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px"
-        >
-          <el-icon v-if="job.status === 'syncing'" class="is-loading"><Loading /></el-icon>
-          <el-icon v-else-if="job.status === 'done'" style="color: #67c23a"><CircleCheck /></el-icon>
-          <el-icon v-else-if="job.status === 'failed'" style="color: #f56c6c"><CircleClose /></el-icon>
-          <el-icon v-else style="color: #909399"><Clock /></el-icon>
-          <span style="flex: 1">{{ name }}</span>
-          <el-tag :type="statusTagType(job.status)" size="small">{{ statusLabel(job.status) }}</el-tag>
-          <span v-if="job.error" style="color: #f56c6c; font-size: 12px">{{ job.error }}</span>
+      <div style="max-height: 60vh; overflow-y: auto">
+        <div v-for="(job, name) in syncJobs" :key="name" class="sync-log-entry">
+          <div class="sync-log-row">
+            <el-icon v-if="job.status === 'syncing'" class="is-loading"><Loading /></el-icon>
+            <el-icon v-else-if="job.status === 'done'" style="color: #67c23a"><CircleCheck /></el-icon>
+            <el-icon v-else-if="job.status === 'failed'" style="color: #f56c6c"><CircleClose /></el-icon>
+            <el-icon v-else style="color: #909399"><Clock /></el-icon>
+            <span style="flex: 1">{{ name }}</span>
+            <el-tag :type="statusTagType(job.status)" size="small">{{ statusLabel(job.status) }}</el-tag>
+            <span v-if="job.error" class="sync-log-error">{{ job.error }}</span>
+            <el-button link size="small" @click.stop="toggleSyncLog(name)">
+              {{ expandedSyncLogs.has(name) ? '收起日志' : '查看日志' }}
+            </el-button>
+          </div>
+          <div v-if="expandedSyncLogs.has(name)" class="sync-log-detail">
+            <div class="sync-log-summary">
+              <span>模式：{{ job.details?.force ? '强制 fetch' : '缓存判断' }} · {{ job.details?.sequential ? '串行' : '并发' }}</span>
+              <span v-if="job.details?.result">结果：{{ job.details.result.branch_count }} 分支，{{ job.details.result.total_commits }} 次提交</span>
+            </div>
+            <div v-for="(event, eventIndex) in (job.details?.events || [])" :key="`${name}-event-${eventIndex}`" class="sync-log-event">
+              <el-tag :type="event.status === 'failed' ? 'danger' : event.status === 'success' ? 'success' : event.status === 'skipped' ? 'info' : 'warning'" size="small">
+                {{ event.stage }}
+              </el-tag>
+              <span>{{ event.message }}</span>
+            </div>
+            <div v-for="(command, commandIndex) in (job.details?.commands || [])" :key="`${name}-command-${commandIndex}`" class="sync-command-log">
+              <div class="sync-command-header">
+                <el-tag :type="command.status === 'success' ? 'success' : command.status === 'failed' ? 'danger' : 'warning'" size="small">
+                  {{ command.status === 'success' ? '成功' : command.status === 'failed' ? '失败' : '执行中' }}
+                </el-tag>
+                <span>{{ command.duration_ms != null ? `${command.duration_ms} ms` : '执行中' }}</span>
+              </div>
+              <pre class="sync-command-text">$ {{ command.command }}</pre>
+              <div class="sync-command-cwd">工作目录：{{ command.cwd }}</div>
+              <pre v-if="command.stdout" class="sync-command-output">{{ command.stdout }}</pre>
+              <pre v-if="command.stderr" class="sync-command-error">{{ command.stderr }}</pre>
+            </div>
+            <el-empty v-if="!(job.details?.commands || []).length && !(job.details?.events || []).length" description="暂无详细日志" :image-size="40" />
+          </div>
         </div>
       </div>
     </el-card>
@@ -109,7 +135,7 @@
             <el-button
               size="small"
               :loading="isSyncing(repo.full_name)"
-              :disabled="isSyncing(repo.full_name)"
+              :disabled="syncingAll || hasActiveSync"
               @click.stop="syncOne(repo)"
             >
               {{ isSyncing(repo.full_name) ? '同步中' : repo.is_cloned ? '重新同步' : '同步' }}
@@ -244,6 +270,7 @@ const search = ref('')
 const expanded = ref(new Set())
 const syncJobs = ref({})
 const syncingAll = ref(false)
+const expandedSyncLogs = ref(new Set())
 const recentCommits = ref({})  // 存储最近提交
 const recentCommitsLoading = ref({})  // 加载状态
 let pollTimer = null
@@ -307,7 +334,7 @@ const allDone = computed(() => {
   return jobs.length > 0 && jobs.every(j => j.status === 'done' || j.status === 'failed')
 })
 
-const hasUnsynced = computed(() => repos.value.some(r => !r.is_cloned))
+const hasActiveSync = computed(() => Object.values(syncJobs.value).some(j => j.status === 'queued' || j.status === 'syncing'))
 
 function toggle(name) {
   if (expanded.value.has(name)) {
@@ -339,6 +366,13 @@ async function loadRecentCommits(repoFullName) {
 function isSyncing(name) {
   const j = syncJobs.value[name]
   return j && (j.status === 'queued' || j.status === 'syncing')
+}
+
+function toggleSyncLog(name) {
+  const next = new Set(expandedSyncLogs.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  expandedSyncLogs.value = next
 }
 
 function cloneLabel(repo) {
@@ -422,6 +456,15 @@ async function fetchData() {
   loading.value = false
 }
 
+async function restoreSyncStatus() {
+  try {
+    const { data } = await client.get('/repos/sync/status')
+    if (data && Object.keys(data).length) {
+      syncJobs.value = data
+    }
+  } catch { /* status history is optional on initial page load */ }
+}
+
 async function refreshFromGitHub() {
   refreshing.value = true
   try {
@@ -467,7 +510,7 @@ function stopPoll() {
 
 async function syncOne(repo) {
   try {
-    await client.post('/repos/sync', [repo.full_name])
+    await client.post('/repos/sync', [repo.full_name], { params: { force: true, sequential: true } })
     syncJobs.value = { ...syncJobs.value, [repo.full_name]: { status: 'queued', error: null } }
     startPoll()
   } catch (e) {
@@ -527,29 +570,145 @@ async function copyGitCommand(repo) {
 async function syncAll() {
   syncingAll.value = true
   try {
-    // Prefer unsynced repos first; only fall back to all if everything is already synced
-    const all = repos.value.map(r => r.full_name)
-    const unsynced = repos.value.filter(r => !r.is_cloned).map(r => r.full_name)
-    const body = unsynced.length > 0 ? unsynced : all
-    const { data } = await client.post('/repos/sync', body)
+    // Refresh pushed_at first, then force a sequential fetch for every repo.
+    // A failed repository is recorded by the backend without stopping the batch.
+    refreshing.value = true
+    const { data: refreshedRepos } = await client.post('/repos/refresh')
+    repos.value = refreshedRepos
+    refreshing.value = false
+
+    const all = refreshedRepos.map(r => r.full_name)
+    if (!all.length) {
+      syncingAll.value = false
+      ElMessage.warning('没有可同步的仓库')
+      return
+    }
+
+    const { data } = await client.post('/repos/sync', all, { params: { force: true, sequential: true } })
     const jobs = {}
     for (const name of data.queued) {
       jobs[name] = { status: 'queued', error: null }
     }
     syncJobs.value = jobs
-    const hint = unsynced.length > 0
-      ? `已提交 ${data.queued.length} 个未同步仓库`
-      : `已提交 ${data.queued.length} 个仓库更新任务`
-    ElMessage.success(hint)
-    startPoll()
+    if (data.queued.length) {
+      ElMessage.success(`已刷新元数据，并提交 ${data.queued.length} 个仓库的强制串行更新`)
+      startPoll()
+    } else {
+      syncingAll.value = false
+      ElMessage.info('仓库已有同步任务在执行，本次未重复提交')
+    }
   } catch (e) {
+    refreshing.value = false
     syncingAll.value = false
-    ElMessage.error(e.response?.data?.detail || '全量同步失败')
+    ElMessage.error(e.response?.data?.detail || '全量更新失败')
   }
 }
 
 onMounted(() => {
   fetchData()
+  restoreSyncStatus()
 })
 onUnmounted(() => stopPoll())
 </script>
+
+<style scoped>
+.sync-log-entry {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.sync-log-entry:last-child {
+  border-bottom: 0;
+}
+
+.sync-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 0;
+  font-size: 13px;
+}
+
+.sync-log-error {
+  max-width: 42%;
+  overflow: hidden;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-log-detail {
+  margin: 0 0 10px 26px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--el-color-primary-light-5);
+  background: var(--el-fill-color-lighter);
+  font-size: 12px;
+}
+
+.sync-log-summary {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--el-text-color-secondary);
+}
+
+.sync-log-event {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  border-top: 1px solid var(--el-border-color-lighter);
+}
+
+.sync-command-log {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: var(--el-bg-color);
+}
+
+.sync-command-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--el-text-color-secondary);
+}
+
+.sync-command-text,
+.sync-command-output,
+.sync-command-error {
+  max-height: 180px;
+  margin: 6px 0 0;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 3px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sync-command-text {
+  color: var(--el-text-color-primary);
+  background: var(--el-fill-color-dark);
+}
+
+.sync-command-cwd {
+  margin-top: 6px;
+  color: var(--el-text-color-secondary);
+  word-break: break-all;
+}
+
+.sync-command-output {
+  color: var(--el-color-success-dark-2);
+  background: var(--el-color-success-light-9);
+}
+
+.sync-command-error {
+  color: var(--el-color-danger-dark-2);
+  background: var(--el-color-danger-light-9);
+}
+</style>
